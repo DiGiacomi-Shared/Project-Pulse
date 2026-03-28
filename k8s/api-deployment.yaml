@@ -1,0 +1,80 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pulse-api
+  namespace: project-pulse
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pulse-api
+  template:
+    metadata:
+      labels:
+        app: pulse-api
+    spec:
+      containers:
+        - name: api
+          image: project-pulse-api:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          env:
+            - name: DATABASE_URL
+              value: "postgresql+asyncpg://pulse:pulse@postgres:5432/pulse"
+            - name: REDIS_URL
+              value: "redis://redis:6379/0"
+            - name: BRAIN_DB_PATH
+              value: "/data/brain"
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: github-token
+                  key: token
+          volumeMounts:
+            - name: brain-storage
+              mountPath: /data/brain
+              readOnly: true
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 30
+      volumes:
+        - name: brain-storage
+          persistentVolumeClaim:
+            claimName: brain-pvc
+            readOnly: true
+      # Allow K3s to schedule on this node
+      nodeSelector:
+        kubernetes.io/hostname: Legion5
+      # Tolerations for node scheduling
+      tolerations:
+        - key: "CriticalAddonsOnly"
+          operator: "Exists"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pulse-api
+  namespace: project-pulse
+spec:
+  selector:
+    app: pulse-api
+  ports:
+    - port: 80
+      targetPort: 8000

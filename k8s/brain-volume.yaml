@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: brain-pv
+  namespace: project-pulse
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadOnlyMany
+  hostPath:
+    path: /home/mdigiacomi/.openclaw/workspace/.brain_chroma
+    type: Directory
+  claimRef:
+    namespace: project-pulse
+    name: brain-pvc
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: brain-pvc
+  namespace: project-pulse
+spec:
+  accessModes:
+    - ReadOnlyMany
+  resources:
+    requests:
+      storage: 1Gi
