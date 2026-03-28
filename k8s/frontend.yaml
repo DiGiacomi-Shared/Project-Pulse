@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pulse-frontend
+  namespace: project-pulse
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pulse-frontend
+  template:
+    metadata:
+      labels:
+        app: pulse-frontend
+    spec:
+      containers:
+        - name: frontend
+          image: project-pulse-frontend:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "50m"
+            limits:
+              memory: "64Mi"
+              cpu: "100m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pulse-frontend
+  namespace: project-pulse
+spec:
+  selector:
+    app: pulse-frontend
+  ports:
+    - port: 80
+      targetPort: 80
