@@ -58,12 +58,25 @@ def generate_insights():
     """
     logger.info("Generating insights")
     
-    # TODO: Implement insight generation
-    # - Query database for idle projects
-    # - Check PR ages
-    # - Cross-reference with Brain
+    from services.insight_generator import get_insight_generator
     
-    return {"status": "completed", "insights_generated": 0}
+    try:
+        generator = get_insight_generator()
+        insights = generator.generate_all()
+        
+        # TODO: Store insights in database
+        
+        return {
+            "status": "completed",
+            "insights_generated": len(insights),
+            "insights": [
+                {"type": i["type"], "title": i["title"], "severity": i["severity"]}
+                for i in insights[:10]  # Summary only
+            ]
+        }
+    except Exception as e:
+        logger.error(f"Insight generation failed: {e}")
+        return {"status": "error", "error": str(e)}
 
 
 @celery_app.task
