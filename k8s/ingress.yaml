@@ -3,12 +3,9 @@ kind: Ingress
 metadata:
   name: pulse-ingress
   namespace: project-pulse
-  annotations:
-    traefik.ingress.kubernetes.io/router.entrypoints: web
 spec:
   rules:
-    - host: pulse.local
-      http:
+    - http:
         paths:
           - path: /api
             pathType: Prefix
@@ -17,18 +14,10 @@ spec:
                 name: pulse-api
                 port:
                   number: 80
----
-# Alternative: NodePort for local access without DNS
-apiVersion: v1
-kind: Service
-metadata:
-  name: pulse-api-nodeport
-  namespace: project-pulse
-spec:
-  type: NodePort
-  selector:
-    app: pulse-api
-  ports:
-    - port: 80
-      targetPort: 8000
-      nodePort: 30080
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: pulse-frontend
+                port:
+                  number: 80

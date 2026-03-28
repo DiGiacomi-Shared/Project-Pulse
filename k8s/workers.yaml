@@ -52,7 +52,7 @@ spec:
             claimName: brain-pvc
             readOnly: true
       nodeSelector:
-        kubernetes.io/hostname: Legion5
+        kubernetes.io/hostname: legion5
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -108,4 +108,4 @@ spec:
             claimName: brain-pvc
             readOnly: true
       nodeSelector:
-        kubernetes.io/hostname: Legion5
+        kubernetes.io/hostname: legion5

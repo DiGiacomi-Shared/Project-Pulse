@@ -24,7 +24,6 @@ function Insights() {
   const [insights, setInsights] = useState<Insight[]>([])
   const [healthScores, setHealthScores] = useState<HealthScore[]>([])
   const [loading, setLoading] = useState(true)
-  const [selectedProject, setSelectedProject] = useState('specterdefence')
 
   useEffect(() => {
     // Fetch insights
