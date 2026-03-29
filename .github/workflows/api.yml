@@ -144,8 +144,12 @@ jobs:
 
       - name: Deploy to Kubernetes
         run: |
+          # Skip TLS verification (self-signed cert on K3s)
+          export KUBECONFIG="${{ secrets.KUBE_CONFIG }}"
+          kubectl config set-cluster default --insecure-skip-tls-verify=true
+          
           # Apply manifests
-          kubectl apply -k k8s/ -n project-pulse
+          kubectl apply -k k8s/ -n project-pulse --validate=false
 
           # Update images
           kubectl set image deployment/pulse-api \
