@@ -125,7 +125,7 @@ jobs:
           args: '--accept-routes --accept-dns'
 
       - name: Set up kubectl
-        uses: azure/k8s-set-context@v1
+        uses: # Setup kubectl manually
         with:
           kubeconfig: ${{ secrets.KUBE_CONFIG }}
 
