@@ -2,19 +2,19 @@ name: Project Pulse API CI/CD
 
 on:
   push:
-    branches: [main]
-    tags: ['v*']
+    branches: [ main ]
+    tags: [ 'v*' ]
     paths:
       - 'src/api/**'
-      - 'src/api/Dockerfile'
-      - 'src/api/requirements.txt'
+      - 'Dockerfile.api'
+      - 'requirements.txt'
       - '.github/workflows/api.yml'
   pull_request:
-    branches: [main]
+    branches: [ main ]
     paths:
       - 'src/api/**'
-      - 'src/api/Dockerfile'
-      - 'src/api/requirements.txt'
+      - 'Dockerfile.api'
+      - 'requirements.txt'
       - '.github/workflows/api.yml'
   workflow_dispatch:
 
@@ -38,25 +38,33 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
+        working-directory: ./src/api
         run: |
-          cd src/api
           pip install -r requirements.txt
-          pip install pytest pytest-asyncio ruff black mypy
+          pip install pytest pytest-asyncio pytest-cov ruff black mypy
 
       - name: Run Ruff (linter)
-        run: |
-          cd src/api
-          ruff check . || echo "Lint issues found (non-blocking)"
+        working-directory: ./src/api
+        run: ruff check . || echo "Lint issues found (non-blocking)"
 
       - name: Run Black (format check)
-        run: |
-          cd src/api
-          black --check . || echo "Format issues found (non-blocking)"
+        working-directory: ./src/api
+        run: black --check . || echo "Format issues found (non-blocking)"
 
       - name: Run MyPy (type check)
-        run: |
-          cd src/api
-          mypy . || echo "Type issues found (non-blocking)"
+        working-directory: ./src/api
+        run: mypy . || echo "Type issues found (non-blocking)"
+
+      - name: Run tests
+        working-directory: ./src/api
+        run: pytest tests/ -v --cov=src --cov-report=xml --cov-report=term || echo "Tests failed (non-blocking)"
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        if: github.event_name == 'push'
+        with:
+          files: ./src/api/coverage.xml
+          fail_ci_if_error: false
 
   # ============================================
   # Build and Push
@@ -99,7 +107,8 @@ jobs:
       - name: Build and push API image
         uses: docker/build-push-action@v5
         with:
-          context: ./src/api
+          context: .
+          file: ./Dockerfile.api
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -110,7 +119,7 @@ jobs:
           platforms: linux/amd64
 
   # ============================================
-  # Deploy to K3s
+  # Deploy (main branch only)
   # ============================================
   deploy:
     runs-on: ubuntu-latest
@@ -122,46 +131,36 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup SSH for K3s
-        uses: appleboy/ssh-action@v1.0.0
+      - name: Setup Tailscale
+        uses: tailscale/github-action@v2
         with:
-          host: ${{ secrets.K3S_HOST }}
-          username: ${{ secrets.K3S_USER }}
-          key: ${{ secrets.K3S_SSH_KEY }}
-          script: |
-            echo "Connected to K3s"
+          authkey: ${{ secrets.TAILSCALE_AUTH_KEY }}
+          args: '--accept-routes --accept-dns'
 
-      - name: Deploy to K3s
-        uses: appleboy/ssh-action@v1.0.0
+      - name: Set up kubectl
+        uses: azure/k8s-set-context@v1
         with:
-          host: ${{ secrets.K3S_HOST }}
-          username: ${{ secrets.K3S_USER }}
-          key: ${{ secrets.K3S_SSH_KEY }}
-          script: |
-            # Import new image
-            sudo k3s ctr images pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          kubeconfig: ${{ secrets.KUBE_CONFIG }}
 
-            # Update deployment
-            sudo kubectl set image deployment/pulse-api \
-              pulse-api=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
-              -n project-pulse
+      - name: Deploy to Kubernetes
+        run: |
+          # Apply manifests
+          kubectl apply -k k8s/ -n project-pulse
 
-            # Update workers
-            sudo kubectl set image deployment/pulse-workers \
-              worker=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
-              -n project-pulse
+          # Update images
+          kubectl set image deployment/pulse-api \
+            pulse-api=ghcr.io/digiacomi-shared/project-pulse-api:latest \
+            -n project-pulse
 
-            # Update beat scheduler
-            sudo kubectl set image deployment/pulse-beat \
-              beat=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
-              -n project-pulse
+          kubectl set image deployment/pulse-workers \
+            worker=ghcr.io/digiacomi-shared/project-pulse-api:latest \
+            -n project-pulse
+
+          kubectl set image deployment/pulse-beat \
+            beat=ghcr.io/digiacomi-shared/project-pulse-api:latest \
+            -n project-pulse
 
       - name: Verify deployment
-        uses: appleboy/ssh-action@v1.0.0
-        with:
-          host: ${{ secrets.K3S_HOST }}
-          username: ${{ secrets.K3S_USER }}
-          key: ${{ secrets.K3S_SSH_KEY }}
-          script: |
-            sudo kubectl rollout status deployment/pulse-api -n project-pulse --timeout=5m
-            sudo kubectl rollout status deployment/pulse-workers -n project-pulse --timeout=5m
+        run: |
+          kubectl rollout status deployment/pulse-api -n project-pulse --timeout=5m
+          kubectl rollout status deployment/pulse-workers -n project-pulse --timeout=5m

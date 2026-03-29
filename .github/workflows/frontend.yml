@@ -2,15 +2,17 @@ name: Project Pulse Frontend CI/CD
 
 on:
   push:
-    branches: [main]
-    tags: ['v*']
+    branches: [ main ]
+    tags: [ 'v*' ]
     paths:
       - 'src/frontend/**'
+      - 'Dockerfile.frontend'
       - '.github/workflows/frontend.yml'
   pull_request:
-    branches: [main]
+    branches: [ main ]
     paths:
       - 'src/frontend/**'
+      - 'Dockerfile.frontend'
       - '.github/workflows/frontend.yml'
   workflow_dispatch:
 
@@ -20,15 +22,15 @@ env:
 
 jobs:
   # ============================================
-  # Build and Test
+  # Lint & Test
   # ============================================
-  build-test:
+  lint-test:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Node.js
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
@@ -36,31 +38,27 @@ jobs:
           cache-dependency-path: src/frontend/package-lock.json
 
       - name: Install dependencies
-        run: |
-          cd src/frontend
-          npm ci
+        working-directory: ./src/frontend
+        run: npm install --legacy-peer-deps
 
-      - name: Run TypeScript check
-        run: |
-          cd src/frontend
-          npx tsc --noEmit || echo "Type issues found (non-blocking)"
+      - name: Run lint
+        working-directory: ./src/frontend
+        run: npm run lint || echo "Lint issues found (non-blocking)"
 
-      - name: Run linter
-        run: |
-          cd src/frontend
-          npm run lint 2>/dev/null || npx eslint src/ || echo "Lint issues found (non-blocking)"
+      - name: Run type check
+        working-directory: ./src/frontend
+        run: npm run typecheck || echo "Type issues found (non-blocking)"
 
-      - name: Build frontend
-        run: |
-          cd src/frontend
-          npm run build
+      - name: Run tests
+        working-directory: ./src/frontend
+        run: npm run test -- --coverage --passWithNoTests || echo "Tests failed (non-blocking)"
 
   # ============================================
   # Build and Push
   # ============================================
-  build-push:
+  build:
     runs-on: ubuntu-latest
-    needs: build-test
+    needs: lint-test
     permissions:
       contents: read
       packages: write
@@ -96,7 +94,8 @@ jobs:
       - name: Build and push frontend image
         uses: docker/build-push-action@v5
         with:
-          context: ./src/frontend
+          context: .
+          file: ./Dockerfile.frontend
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -107,11 +106,11 @@ jobs:
           platforms: linux/amd64
 
   # ============================================
-  # Deploy to K3s
+  # Deploy (main branch only)
   # ============================================
   deploy:
     runs-on: ubuntu-latest
-    needs: build-push
+    needs: build
     if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
     permissions:
       contents: read
@@ -119,26 +118,27 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Deploy to K3s
-        uses: appleboy/ssh-action@v1.0.0
+      - name: Setup Tailscale
+        uses: tailscale/github-action@v2
         with:
-          host: ${{ secrets.K3S_HOST }}
-          username: ${{ secrets.K3S_USER }}
-          key: ${{ secrets.K3S_SSH_KEY }}
-          script: |
-            # Import new image
-            sudo k3s ctr images pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          authkey: ${{ secrets.TAILSCALE_AUTH_KEY }}
+          args: '--accept-routes --accept-dns'
 
-            # Update deployment
-            sudo kubectl set image deployment/pulse-frontend \
-              pulse-frontend=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
-              -n project-pulse
+      - name: Set up kubectl
+        uses: azure/k8s-set-context@v1
+        with:
+          kubeconfig: ${{ secrets.KUBE_CONFIG }}
+
+      - name: Deploy to Kubernetes
+        run: |
+          # Apply manifests
+          kubectl apply -k k8s/ -n project-pulse
+
+          # Update image
+          kubectl set image deployment/pulse-frontend \
+            pulse-frontend=ghcr.io/digiacomi-shared/project-pulse-frontend:latest \
+            -n project-pulse
 
       - name: Verify deployment
-        uses: appleboy/ssh-action@v1.0.0
-        with:
-          host: ${{ secrets.K3S_HOST }}
-          username: ${{ secrets.K3S_USER }}
-          key: ${{ secrets.K3S_SSH_KEY }}
-          script: |
-            sudo kubectl rollout status deployment/pulse-frontend -n project-pulse --timeout=5m
+        run: |
+          kubectl rollout status deployment/pulse-frontend -n project-pulse --timeout=5m
