@@ -140,9 +140,12 @@ jobs:
       - name: Setup kubectl
         run: |
           mkdir -p ~/.kube
-          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
+          # Try base64 decode first, fallback to raw
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config 2>/dev/null || echo "${{ secrets.KUBE_CONFIG }}" > ~/.kube/config
           chmod 600 ~/.kube/config
+          # Skip TLS verification for self-signed K3s cert
           kubectl config set-cluster default --insecure-skip-tls-verify=true --server=https://100.91.146.79:6443
+          kubectl config view
 
       - name: Deploy to Kubernetes
         run: |
