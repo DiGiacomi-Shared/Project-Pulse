@@ -13,24 +13,26 @@ spec:
       labels:
         app: pulse-api
     spec:
+      imagePullSecrets:
+        - name: ghcr-registry-secret
       containers:
         - name: api
-          image: project-pulse-api:latest
-          imagePullPolicy: IfNotPresent
+          image: ghcr.io/digiacomi-shared/project-pulse-api:latest
+          imagePullPolicy: Always
           ports:
             - containerPort: 8000
           env:
             - name: DATABASE_URL
-              value: "postgresql+asyncpg://pulse:pulse@postgres:5432/pulse"
+              value: "postgresql+asyncpg://project_pulse:project_pulse_123@100.102.10.75:5432/project_pulse"
             - name: REDIS_URL
-              value: "redis://redis:6379/0"
+              value: "redis://100.102.10.75:6379/0"
             - name: GITHUB_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: github-token
                   key: token
             - name: BRAIN_PG_HOST
-              value: "198.100.154.175"
+              value: "100.102.10.75"
             - name: BRAIN_PG_DATABASE
               value: "brain"
             - name: BRAIN_PG_USER
@@ -59,9 +61,8 @@ spec:
               port: 8000
             initialDelaySeconds: 10
             periodSeconds: 30
-      # Allow K3s to schedule on this node
       nodeSelector:
-        kubernetes.io/hostname: legion5
+        kubernetes.io/hostname: k3s
 ---
 apiVersion: v1
 kind: Service

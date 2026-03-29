@@ -13,32 +13,39 @@ spec:
       labels:
         app: pulse-workers
     spec:
+      imagePullSecrets:
+        - name: ghcr-registry-secret
       containers:
         - name: worker
-          image: project-pulse-api:latest
-          imagePullPolicy: IfNotPresent
+          image: ghcr.io/digiacomi-shared/project-pulse-api:latest
+          imagePullPolicy: Always
           command: ["celery", "-A", "tasks", "worker", "--loglevel=info", "-n", "worker@%h"]
           env:
             - name: DATABASE_URL
-              value: "postgresql+asyncpg://pulse:pulse@postgres:5432/pulse"
+              value: "postgresql+asyncpg://project_pulse:project_pulse_123@100.102.10.75:5432/project_pulse"
             - name: REDIS_URL
-              value: "redis://redis:6379/0"
-            - name: BRAIN_DB_PATH
-              value: "/data/brain"
+              value: "redis://100.102.10.75:6379/0"
             - name: GITHUB_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: github-token
                   key: token
+            - name: BRAIN_PG_HOST
+              value: "100.102.10.75"
+            - name: BRAIN_PG_DATABASE
+              value: "brain"
+            - name: BRAIN_PG_USER
+              value: "postgres"
+            - name: BRAIN_PG_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: brain-pg-password
+                  key: password
             - name: GITHUB_REPOS
               valueFrom:
                 configMapKeyRef:
                   name: pulse-config
                   key: repos
-          volumeMounts:
-            - name: brain-storage
-              mountPath: /data/brain
-              readOnly: true
           resources:
             requests:
               memory: "128Mi"
@@ -46,13 +53,8 @@ spec:
             limits:
               memory: "256Mi"
               cpu: "200m"
-      volumes:
-        - name: brain-storage
-          persistentVolumeClaim:
-            claimName: brain-pvc
-            readOnly: true
       nodeSelector:
-        kubernetes.io/hostname: legion5
+        kubernetes.io/hostname: k3s
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -69,32 +71,39 @@ spec:
       labels:
         app: pulse-beat
     spec:
+      imagePullSecrets:
+        - name: ghcr-registry-secret
       containers:
         - name: beat
-          image: project-pulse-api:latest
-          imagePullPolicy: IfNotPresent
+          image: ghcr.io/digiacomi-shared/project-pulse-api:latest
+          imagePullPolicy: Always
           command: ["celery", "-A", "tasks", "beat", "--loglevel=info"]
           env:
             - name: DATABASE_URL
-              value: "postgresql+asyncpg://pulse:pulse@postgres:5432/pulse"
+              value: "postgresql+asyncpg://project_pulse:project_pulse_123@100.102.10.75:5432/project_pulse"
             - name: REDIS_URL
-              value: "redis://redis:6379/0"
-            - name: BRAIN_DB_PATH
-              value: "/data/brain"
+              value: "redis://100.102.10.75:6379/0"
             - name: GITHUB_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: github-token
                   key: token
+            - name: BRAIN_PG_HOST
+              value: "100.102.10.75"
+            - name: BRAIN_PG_DATABASE
+              value: "brain"
+            - name: BRAIN_PG_USER
+              value: "postgres"
+            - name: BRAIN_PG_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: brain-pg-password
+                  key: password
             - name: GITHUB_REPOS
               valueFrom:
                 configMapKeyRef:
                   name: pulse-config
                   key: repos
-          volumeMounts:
-            - name: brain-storage
-              mountPath: /data/brain
-              readOnly: true
           resources:
             requests:
               memory: "64Mi"
@@ -102,10 +111,5 @@ spec:
             limits:
               memory: "128Mi"
               cpu: "100m"
-      volumes:
-        - name: brain-storage
-          persistentVolumeClaim:
-            claimName: brain-pvc
-            readOnly: true
       nodeSelector:
-        kubernetes.io/hostname: legion5
+        kubernetes.io/hostname: k3s

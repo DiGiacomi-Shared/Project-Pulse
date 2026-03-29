@@ -2,6 +2,7 @@
 Brain (PostgreSQL + pgvector) client for querying the workspace Brain
 """
 
+import os
 import sys
 from pathlib import Path
 from typing import List, Dict, Optional
@@ -10,16 +11,12 @@ import json
 
 logger = logging.getLogger(__name__)
 
-# Add Brain to path
-BRAIN_PATH = Path("/home/mdigiacomi/.openclaw/workspace/workspace_brain")
-sys.path.insert(0, str(BRAIN_PATH))
-
-# PostgreSQL config
+# PostgreSQL config from environment or defaults
 PG_CONFIG = {
-    'host': '198.100.154.175',
-    'database': 'brain',
-    'user': 'postgres',
-    'password': 'brain123'
+    'host': os.getenv('BRAIN_PG_HOST', '100.102.10.75'),
+    'database': os.getenv('BRAIN_PG_DATABASE', 'brain'),
+    'user': os.getenv('BRAIN_PG_USER', 'postgres'),
+    'password': os.getenv('BRAIN_PG_PASSWORD', 'brain123')
 }
 
 

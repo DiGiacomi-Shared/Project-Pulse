@@ -13,10 +13,12 @@ spec:
       labels:
         app: pulse-frontend
     spec:
+      imagePullSecrets:
+        - name: ghcr-registry-secret
       containers:
         - name: frontend
-          image: project-pulse-frontend:latest
-          imagePullPolicy: IfNotPresent
+          image: ghcr.io/digiacomi-shared/project-pulse-frontend:latest
+          imagePullPolicy: Always
           ports:
             - containerPort: 80
           resources:
@@ -26,6 +28,8 @@ spec:
             limits:
               memory: "64Mi"
               cpu: "100m"
+      nodeSelector:
+        kubernetes.io/hostname: k3s
 ---
 apiVersion: v1
 kind: Service
