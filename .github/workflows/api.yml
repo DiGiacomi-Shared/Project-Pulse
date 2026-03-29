@@ -140,12 +140,19 @@ jobs:
       - name: Setup kubectl
         run: |
           mkdir -p ~/.kube
-          # Try base64 decode first, fallback to raw
-          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config 2>/dev/null || echo "${{ secrets.KUBE_CONFIG }}" > ~/.kube/config
+          # Decode base64 kubeconfig
+          if [ -n "${{ secrets.KUBE_CONFIG }}" ]; then
+            echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
+          else
+            echo "ERROR: KUBE_CONFIG secret not set"
+            exit 1
+          fi
           chmod 600 ~/.kube/config
-          # Skip TLS verification for self-signed K3s cert
+          # Skip TLS verification
           kubectl config set-cluster default --insecure-skip-tls-verify=true --server=https://100.91.146.79:6443
+          # Verify
           kubectl config view
+          kubectl get nodes
 
       - name: Deploy to Kubernetes
         run: |
