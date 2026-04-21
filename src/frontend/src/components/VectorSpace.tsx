@@ -14,6 +14,12 @@ interface MemoryPoint {
   created_at: string | null
 }
 
+interface ChartPoint extends MemoryPoint {
+  cx: number
+  cy: number
+  fill: string
+}
+
 interface ProjectionData {
   points: MemoryPoint[]
   projections: number[][]
@@ -98,7 +104,7 @@ function VectorSpace() {
   const [showEdges, setShowEdges] = useState(true)
   const [stats, setStats] = useState<Stats | null>(null)
   const [hoveredPoint, setHoveredPoint] = useState<number | null>(null)
-  const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number; point: MemoryPoint } | null>(null)
+  const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number; point: ChartPoint } | null>(null)
   const svgRef = useRef<SVGSVGElement>(null)
   const [dimensions, setDimensions] = useState({ width: 900, height: 520 })
 
@@ -112,8 +118,8 @@ function VectorSpace() {
   }, [data])
 
   // Compute chart data with canvas coordinates
-  const chartData = useMemo(() => {
-    if (!data || !data.projections.length) return { points: [], xRange: [0, 1], yRange: [0, 1] }
+  const chartData = useMemo((): { points: ChartPoint[]; xRange: number[]; yRange: number[] } => {
+    if (!data || !data.projections.length) return { points: [] as ChartPoint[], xRange: [0, 1], yRange: [0, 1] }
 
     const projs = data.projections
     let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity
@@ -133,7 +139,7 @@ function VectorSpace() {
     const plotW = dimensions.width - MARGIN * 2
     const plotH = dimensions.height - MARGIN * 2
 
-    const points = data.points.map((point, i) => {
+    const points: ChartPoint[] = data.points.map((point, i) => {
       const proj = projs[i] || [0, 0]
       const cx = MARGIN + ((proj[0] - xMin) / (xMax - xMin)) * plotW
       const cy = MARGIN + ((proj[1] - yMin) / (yMax - yMin)) * plotH
@@ -142,7 +148,7 @@ function VectorSpace() {
         cx,
         cy,
         fill: getColor(point, colorBy),
-      }
+      } as ChartPoint
     })
 
     return { points, xRange: [xMin, xMax], yRange: [yMin, yMax] }
@@ -264,16 +270,18 @@ function VectorSpace() {
     const y = e.clientY - rect.top
 
     // Find closest point
-    let closest: { idx: number; dist: number } | null = null
+    let closestIdx = -1
+    let closestDist = Infinity
     chartData.points.forEach((p, i) => {
       const dist = Math.hypot(p.cx - x, p.cy - y)
-      if (dist < POINT_RADIUS + 8) {
-        if (!closest || dist < closest.dist) closest = { idx: i, dist }
+      if (dist < POINT_RADIUS + 8 && dist < closestDist) {
+        closestIdx = i
+        closestDist = dist
       }
     })
 
-    if (closest) {
-      const p = chartData.points[closest.idx]
+    if (closestIdx >= 0) {
+      const p = chartData.points[closestIdx]
       setHoveredPoint(p.id)
       setTooltipPos({ x: p.cx, y: p.cy, point: p })
     } else {
@@ -565,7 +573,7 @@ function VectorSpace() {
               >
                 <div className="font-semibold text-white truncate">{tooltipPos.point.content_summary}</div>
                 <div className="text-gray-400 mt-1.5 flex items-center gap-1.5">
-                  <span className="inline-block w-2 h-2 rounded-full" style={{ background: tooltipPos.point.fill }} />
+                  <span className="inline-block w-2 h-2 rounded-full" style={{ background: getColor(tooltipPos.point, colorBy) }} />
                   {tooltipPos.point.namespace} / {tooltipPos.point.category}
                 </div>
                 {tooltipPos.point.source && <div className="text-gray-500 mt-1">Source: {tooltipPos.point.source}</div>}
@@ -683,7 +691,7 @@ function VectorSpace() {
                       className="flex items-center gap-2 text-sm cursor-pointer hover:bg-white/[0.02] rounded-lg px-2 py-1 transition-colors"
                       onClick={() => handlePointClick(otherPoint)}
                     >
-                      <span className="inline-block w-2 h-2 rounded-full" style={{ background: otherPoint.fill }} />
+                      <span className="inline-block w-2 h-2 rounded-full" style={{ background: getColor(otherPoint, colorBy) }} />
                       <span className="text-gray-300 truncate flex-1">{otherPoint.content_summary}</span>
                       <span className="text-xs font-mono text-cyan-400">{(edge.similarity * 100).toFixed(0)}%</span>
                     </div>
