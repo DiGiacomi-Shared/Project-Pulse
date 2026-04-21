@@ -18,8 +18,17 @@ class Settings(BaseSettings):
     # Database
     DATABASE_URL: str = os.getenv(
         "DATABASE_URL",
-        "postgresql://pulse:pulse@postgres:5432/pulse"
+        "postgresql://pulse:***@postgres:5432/pulse"
     )
+    
+    # ACE (AI Context Engine) database
+    ACE_PG_HOST: str = os.getenv("ACE_PG_HOST", "100.102.10.75")
+    ACE_PG_PORT: int = int(os.getenv("ACE_PG_PORT", "5432"))
+    ACE_PG_DATABASE: str = os.getenv("ACE_PG_DATABASE", "context_engine")
+    ACE_PG_USER: str = os.getenv("ACE_PG_USER", "context_engine")
+    ACE_PG_PASSWORD: str = os.getenv("ACE_PG_PASSWORD", "ctx2024engine")
+    OLLAMA_URL: str = os.getenv("OLLAMA_URL", "http://localhost:11434")
+    OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "nomic-embed-text")
     
     # Redis
     REDIS_URL: str = os.getenv("REDIS_URL", "redis://redis:6379/0")

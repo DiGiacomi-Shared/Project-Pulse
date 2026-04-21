@@ -1,14 +1,16 @@
 import { useState, useEffect } from 'react'
 import BrainSearch from './BrainSearch'
+import VectorSpace from './VectorSpace'
 import Insights from './Insights'
 import RepoList from './RepoList'
 
-type Tab = 'overview' | 'brain' | 'insights' | 'repos'
+type Tab = 'overview' | 'brain' | 'insights' | 'repos' | 'vectorspace'
 
 function Dashboard() {
   const [activeTab, setActiveTab] = useState<Tab>('overview')
   const [health, setHealth] = useState<{ status: string } | null>(null)
   const [brainStats, setBrainStats] = useState<{ document_count: number } | null>(null)
+  const [aceStats, setAceStats] = useState<{ total_memories: number } | null>(null)
 
   useEffect(() => {
     fetch('/api/health')
@@ -18,6 +20,10 @@ function Dashboard() {
     fetch('/api/brain/stats')
       .then(r => r.json())
       .then(setBrainStats)
+    
+    fetch('/api/vectorspace/stats')
+      .then(r => r.json())
+      .then(setAceStats)
   }, [])
 
   return (
@@ -37,6 +43,12 @@ function Dashboard() {
           </div>
         </div>
         <div className="bg-white p-4 rounded-lg shadow-sm border">
+          <div className="text-sm text-gray-500">ACE Memories</div>
+          <div className="font-semibold text-indigo-600">
+            {aceStats?.total_memories?.toLocaleString() || '...'}
+          </div>
+        </div>
+        <div className="bg-white p-4 rounded-lg shadow-sm border">
           <div className="text-sm text-gray-500">Last Sync</div>
           <div className="font-semibold text-gray-900">Just now</div>
         </div>
@@ -50,6 +62,7 @@ function Dashboard() {
             { id: 'brain', label: 'Brain Search' },
             { id: 'insights', label: 'Insights' },
             { id: 'repos', label: 'Repositories' },
+            { id: 'vectorspace', label: 'VectorSpace' },
           ].map((tab) => (
             <button
               key={tab.id}
@@ -96,6 +109,7 @@ function Dashboard() {
         {activeTab === 'brain' && <BrainSearch />}
         {activeTab === 'insights' && <Insights />}
         {activeTab === 'repos' && <RepoList />}
+        {activeTab === 'vectorspace' && <VectorSpace />}
       </div>
     </div>
   )

@@ -42,13 +42,27 @@ spec:
                 secretKeyRef:
                   name: brain-pg-password
                   key: password
+            - name: ACE_PG_HOST
+              value: "100.102.10.75"
+            - name: ACE_PG_PORT
+              value: "5432"
+            - name: ACE_PG_DATABASE
+              value: "context_engine"
+            - name: ACE_PG_USER
+              value: "context_engine"
+            - name: ACE_PG_PASSWORD
+              value: "ctx2024engine"
+            - name: OLLAMA_URL
+              value: "http://100.100.227.127:11434"
+            - name: OLLAMA_MODEL
+              value: "nomic-embed-text"
           resources:
             requests:
-              memory: "256Mi"
+              memory: "512Mi"
               cpu: "250m"
             limits:
-              memory: "512Mi"
-              cpu: "500m"
+              memory: "1Gi"
+              cpu: "1000m"
           readinessProbe:
             httpGet:
               path: /api/health
@@ -62,7 +76,7 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 30
       nodeSelector:
-        kubernetes.io/hostname: k3s
+        kubernetes.io/hostname: minis-server
 ---
 apiVersion: v1
 kind: Service

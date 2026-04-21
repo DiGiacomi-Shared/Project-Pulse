@@ -54,7 +54,7 @@ spec:
               memory: "256Mi"
               cpu: "200m"
       nodeSelector:
-        kubernetes.io/hostname: k3s
+        kubernetes.io/hostname: minis-server
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -112,4 +112,4 @@ spec:
               memory: "128Mi"
               cpu: "100m"
       nodeSelector:
-        kubernetes.io/hostname: k3s
+        kubernetes.io/hostname: minis-server

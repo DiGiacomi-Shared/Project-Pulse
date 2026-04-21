@@ -29,7 +29,7 @@ spec:
               memory: "64Mi"
               cpu: "100m"
       nodeSelector:
-        kubernetes.io/hostname: k3s
+        kubernetes.io/hostname: minis-server
 ---
 apiVersion: v1
 kind: Service

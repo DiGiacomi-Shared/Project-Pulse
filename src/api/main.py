@@ -10,7 +10,7 @@ import logging
 
 from config import settings
 from db import init_db
-from routers import repos, brain, devkit, insights, health
+from routers import repos, brain, devkit, insights, health, vectorspace
 
 # Configure logging
 logging.basicConfig(
@@ -51,6 +51,7 @@ app.include_router(repos.router, prefix="/api", tags=["repos"])
 app.include_router(brain.router, prefix="/api", tags=["brain"])
 app.include_router(devkit.router, prefix="/api", tags=["devkit"])
 app.include_router(insights.router, prefix="/api", tags=["insights"])
+app.include_router(vectorspace.router, prefix="/api", tags=["vectorspace"])
 
 
 @app.get("/")
