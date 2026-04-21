@@ -13,8 +13,6 @@ spec:
       labels:
         app: pulse-api
     spec:
-      imagePullSecrets:
-        - name: ghcr-registry-secret
       containers:
         - name: api
           image: project-pulse-api:latest
@@ -27,10 +25,7 @@ spec:
             - name: REDIS_URL
               value: "redis://100.102.10.75:6379/0"
             - name: GITHUB_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: github-token
-                  key: token
+              value: ""
             - name: BRAIN_PG_HOST
               value: "100.102.10.75"
             - name: BRAIN_PG_DATABASE
@@ -38,10 +33,7 @@ spec:
             - name: BRAIN_PG_USER
               value: "postgres"
             - name: BRAIN_PG_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: brain-pg-password
-                  key: password
+              value: "brain123"
             - name: ACE_PG_HOST
               value: "100.102.10.75"
             - name: ACE_PG_PORT
