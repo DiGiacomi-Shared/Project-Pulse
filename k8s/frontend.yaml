@@ -17,8 +17,8 @@ spec:
         - name: ghcr-registry-secret
       containers:
         - name: frontend
-          image: ghcr.io/digiacomi-shared/project-pulse-frontend:latest
-          imagePullPolicy: Always
+          image: project-pulse-frontend:latest
+          imagePullPolicy: Never
           ports:
             - containerPort: 80
           resources:

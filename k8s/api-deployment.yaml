@@ -17,8 +17,8 @@ spec:
         - name: ghcr-registry-secret
       containers:
         - name: api
-          image: ghcr.io/digiacomi-shared/project-pulse-api:latest
-          imagePullPolicy: Always
+          image: project-pulse-api:latest
+          imagePullPolicy: Never
           ports:
             - containerPort: 8000
           env:
