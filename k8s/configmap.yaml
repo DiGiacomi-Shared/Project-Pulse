@@ -1,9 +1,0 @@
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: pulse-config
-  namespace: project-pulse
-data:
-  repos: "DiGiacomi-Shared/Project-Pulse"
-  # Add more repos: owner/repo,owner/repo2
-  # Example: "specterdefence,screen-sprout-api"

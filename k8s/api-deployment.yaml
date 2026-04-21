@@ -20,20 +20,6 @@ spec:
           ports:
             - containerPort: 8000
           env:
-            - name: DATABASE_URL
-              value: "postgresql+asyncpg://project_pulse:project_pulse_123@100.102.10.75:5432/project_pulse"
-            - name: REDIS_URL
-              value: "redis://100.102.10.75:6379/0"
-            - name: GITHUB_TOKEN
-              value: ""
-            - name: BRAIN_PG_HOST
-              value: "100.102.10.75"
-            - name: BRAIN_PG_DATABASE
-              value: "brain"
-            - name: BRAIN_PG_USER
-              value: "postgres"
-            - name: BRAIN_PG_PASSWORD
-              value: "brain123"
             - name: ACE_PG_HOST
               value: "100.102.10.75"
             - name: ACE_PG_PORT
@@ -48,6 +34,8 @@ spec:
               value: "http://100.100.227.127:11434"
             - name: OLLAMA_MODEL
               value: "nomic-embed-text"
+            - name: CORS_ORIGINS
+              value: '["*"]'
           resources:
             requests:
               memory: "512Mi"

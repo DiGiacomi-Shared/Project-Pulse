@@ -5,15 +5,12 @@ namespace: project-pulse
 
 resources:
   - namespace.yaml
-  - postgres.yaml
-  - redis.yaml
-  - brain-volume.yaml
-  - configmap.yaml
   - api-deployment.yaml
   - frontend.yaml
-  - workers.yaml
   - ingress.yaml
 
 images:
   - name: project-pulse-api
+    newTag: latest
+  - name: project-pulse-frontend
     newTag: latest

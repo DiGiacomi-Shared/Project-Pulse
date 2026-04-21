@@ -1,10 +1,11 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
+import * as d3 from 'd3'
 
 interface MemoryPoint {
   id: number
   doc_id: string
   content_summary: string
-  content_full?: string
+  content_preview: string
   namespace: string
   category: string
   source: string | null
@@ -12,18 +13,14 @@ interface MemoryPoint {
   tags: string[]
   access_count: number
   created_at: string | null
-}
-
-interface ChartPoint extends MemoryPoint {
-  cx: number
-  cy: number
-  fill: string
+  embedding?: number[]
 }
 
 interface ProjectionData {
   points: MemoryPoint[]
   projections: number[][]
   count: number
+  algorithm: string
   error?: string
 }
 
@@ -50,16 +47,6 @@ interface SearchResult {
   similarity: number
 }
 
-interface Stats {
-  total_memories: number
-  by_namespace: Record<string, number>
-  by_category: Record<string, number>
-  status: string
-  database: string
-  embedding_model: string
-  dimensions: number
-}
-
 const NAMESPACE_COLORS: Record<string, string> = {
   default: '#6366f1',
   screensprout: '#22c55e',
@@ -84,202 +71,249 @@ const CATEGORY_COLORS: Record<string, string> = {
   user: '#a855f7',
 }
 
-function getColor(point: MemoryPoint, colorBy: 'namespace' | 'category'): string {
+const CLUSTER_COLORS = [
+  '#6366f1', '#22c55e', '#f59e0b', '#3b82f6', '#ec4899',
+  '#f97316', '#06b6d4', '#8b5cf6', '#ef4444', '#14b8a6'
+]
+
+function getColor(point: MemoryPoint, colorBy: 'namespace' | 'category' | 'cluster', clusterId?: number): string {
   if (colorBy === 'namespace') {
     return NAMESPACE_COLORS[point.namespace] || '#94a3b8'
   }
-  return CATEGORY_COLORS[point.category] || '#94a3b8'
+  if (colorBy === 'category') {
+    return CATEGORY_COLORS[point.category] || '#94a3b8'
+  }
+  return CLUSTER_COLORS[(clusterId || 0) % CLUSTER_COLORS.length] || '#94a3b8'
 }
 
-const MARGIN = 40
-const POINT_RADIUS = 6
+// Simple k-means clustering for client-side grouping
+function kmeans(embeddings: number[][], k: number): number[] {
+  if (embeddings.length < k) return embeddings.map((_, i) => i)
+  
+  // Random initial centroids
+  const centroids = embeddings.slice(0, k)
+  const assignments = new Array(embeddings.length).fill(0)
+  
+  for (let iter = 0; iter < 10; iter++) {
+    // Assign points to nearest centroid
+    for (let i = 0; i < embeddings.length; i++) {
+      let minDist = Infinity
+      let bestCluster = 0
+      for (let j = 0; j < k; j++) {
+        const dist = embeddings[i].reduce((sum, v, idx) => sum + (v - centroids[j][idx]) ** 2, 0)
+        if (dist < minDist) {
+          minDist = dist
+          bestCluster = j
+        }
+      }
+      assignments[i] = bestCluster
+    }
+    
+    // Update centroids
+    for (let j = 0; j < k; j++) {
+      const clusterPoints = embeddings.filter((_, i) => assignments[i] === j)
+      if (clusterPoints.length > 0) {
+        centroids[j] = clusterPoints[0].map((_, idx) => 
+          clusterPoints.reduce((sum, p) => sum + p[idx], 0) / clusterPoints.length
+        )
+      }
+    }
+  }
+  
+  return assignments
+}
 
 function VectorSpace() {
   const [data, setData] = useState<ProjectionData | null>(null)
   const [edges, setEdges] = useState<Edge[]>([])
   const [loading, setLoading] = useState(false)
-  const [edgesLoading, setEdgesLoading] = useState(false)
   const [error, setError] = useState('')
   const [query, setQuery] = useState('')
   const [searchResults, setSearchResults] = useState<SearchResult[]>([])
   const [searching, setSearching] = useState(false)
   const [selectedPoint, setSelectedPoint] = useState<MemoryPoint | null>(null)
-  const [detailLoading, setDetailLoading] = useState(false)
-  const [detailContent, setDetailContent] = useState<string | null>(null)
-  const [colorBy, setColorBy] = useState<'namespace' | 'category'>('namespace')
+  const [colorBy, setColorBy] = useState<'namespace' | 'category' | 'cluster'>('namespace')
   const [namespaceFilter, setNamespaceFilter] = useState<string>('')
   const [similarThreshold, setSimilarThreshold] = useState(0.65)
   const [showEdges, setShowEdges] = useState(true)
   const [explicitEdges, setExplicitEdges] = useState<ExplicitEdge[]>([])
   const [showExplicit, setShowExplicit] = useState(true)
-  const [hoveredExplicitIdx, setHoveredExplicitIdx] = useState<number | null>(null)
-  const [stats, setStats] = useState<Stats | null>(null)
-  const [hoveredPoint, setHoveredPoint] = useState<number | null>(null)
-  const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number; point: ChartPoint } | null>(null)
+  const [umapAvailable, setUmapAvailable] = useState(true)
+  const [algorithm, setAlgorithm] = useState<'umap' | 'pca'>('umap')
+  const [clusterCount, setClusterCount] = useState(5)
+  const [repulsionStrength, setRepulsionStrength] = useState(0.5)
+  
   const svgRef = useRef<SVGSVGElement>(null)
-  const [dimensions, setDimensions] = useState({ width: 900, height: 520 })
+  const containerRef = useRef<HTMLDivElement>(null)
+  const [transform, setTransform] = useState<d3.ZoomTransform>(d3.zoomIdentity)
+  const [hoveredPoint, setHoveredPoint] = useState<number | null>(null)
+  const [detailContent, setDetailContent] = useState<string | null>(null)
+  const [detailLoading, setDetailLoading] = useState(false)
 
-  // Build lookup from point id -> index
-  const idToIndex = useMemo(() => {
-    const map = new Map<number, number>()
-    if (data) {
-      data.points.forEach((p, i) => map.set(p.id, i))
-    }
-    return map
-  }, [data])
+  // Compute clusters
+  const clusters = useMemo(() => {
+    if (!data?.points || colorBy !== 'cluster') return null
+    const embeddings = data.points.map(p => p.embedding || [0, 0])
+    return kmeans(embeddings, Math.min(clusterCount, data.points.length))
+  }, [data, colorBy, clusterCount])
 
-  // Build lookup from point doc_id -> index for explicit edge rendering
-  const docIdToIndex = useMemo(() => {
-    const map = new Map<string, number>()
-    if (data) {
-      data.points.forEach((p, i) => map.set(p.doc_id, i))
-    }
-    return map
-  }, [data])
-
-  // Compute chart data with canvas coordinates
-  const chartData = useMemo((): { points: ChartPoint[]; xRange: number[]; yRange: number[] } => {
-    if (!data || !data.projections.length) return { points: [] as ChartPoint[], xRange: [0, 1], yRange: [0, 1] }
-
-    const projs = data.projections
-    let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity
-    for (const p of projs) {
-      if (p[0] < xMin) xMin = p[0]
-      if (p[0] > xMax) xMax = p[0]
-      if (p[1] < yMin) yMin = p[1]
-      if (p[1] > yMax) yMax = p[1]
-    }
-
-    // Add padding
-    const xPad = Math.max((xMax - xMin) * 0.1, 0.5)
-    const yPad = Math.max((yMax - yMin) * 0.1, 0.5)
-    xMin -= xPad; xMax += xPad
-    yMin -= yPad; yMax += yPad
-
-    const plotW = dimensions.width - MARGIN * 2
-    const plotH = dimensions.height - MARGIN * 2
-
-    const points: ChartPoint[] = data.points.map((point, i) => {
-      const proj = projs[i] || [0, 0]
-      const cx = MARGIN + ((proj[0] - xMin) / (xMax - xMin)) * plotW
-      const cy = MARGIN + ((proj[1] - yMin) / (yMax - yMin)) * plotH
-      return {
-        ...point,
-        cx,
-        cy,
-        fill: getColor(point, colorBy),
-      } as ChartPoint
-    })
-
-    return { points, xRange: [xMin, xMax], yRange: [yMin, yMax] }
-  }, [data, colorBy, dimensions])
-
-  const highlightedIds = useMemo(
-    () => new Set(searchResults.map(r => r.id)),
-    [searchResults]
-  )
-
-  // Edges connected to hovered/selected point
-  const activeEdges = useMemo(() => {
-    const pid = hoveredPoint ?? (selectedPoint?.id ?? null)
-    if (pid === null || !showEdges) return []
-    return edges.filter(e => e.source === pid || e.target === pid)
-  }, [edges, hoveredPoint, selectedPoint, showEdges])
-
-  // Explicit edges connected to selected point (for detail panel)
-  const selectedPointExplicitEdges = useMemo(() => {
-    if (!selectedPoint) return { outgoing: [] as ExplicitEdge[], incoming: [] as ExplicitEdge[] }
-    const docId = selectedPoint.doc_id
-    const outgoing = explicitEdges.filter(e => e.source_doc_id === docId)
-    const incoming = explicitEdges.filter(e => e.target_doc_id === docId)
-    return { outgoing, incoming }
-  }, [selectedPoint, explicitEdges])
-
-  const fetchProjections = useCallback(async () => {
+  // Fetch data
+  const fetchData = useCallback(async () => {
     setLoading(true)
     setError('')
     try {
       const params = new URLSearchParams()
       if (namespaceFilter) params.set('namespace', namespaceFilter)
+      params.set('algorithm', algorithm)
+      
       const res = await fetch(`/api/vectorspace/projections?${params}`)
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const json = await res.json()
       setData(json)
+      setUmapAvailable(json.algorithm === 'umap')
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load projections')
+      setError(err instanceof Error ? err.message : 'Failed to load')
     } finally {
       setLoading(false)
     }
-  }, [namespaceFilter])
+  }, [namespaceFilter, algorithm])
 
-  const fetchRelationships = useCallback(async () => {
+  const fetchEdges = useCallback(async () => {
     if (!showEdges) return
-    setEdgesLoading(true)
     try {
       const params = new URLSearchParams()
       params.set('threshold', similarThreshold.toString())
       if (namespaceFilter) params.set('namespace', namespaceFilter)
       const res = await fetch(`/api/vectorspace/relationships?${params}`)
-      if (!res.ok) throw new Error('Failed to load relationships')
-      const json = await res.json()
-      setEdges(json.edges || [])
+      if (res.ok) {
+        const json = await res.json()
+        setEdges(json.edges || [])
+      }
     } catch {
       setEdges([])
-    } finally {
-      setEdgesLoading(false)
     }
   }, [namespaceFilter, similarThreshold, showEdges])
 
-  const fetchStats = useCallback(async () => {
-    try {
-      const res = await fetch('/api/vectorspace/stats')
-      if (res.ok) setStats(await res.json())
-    } catch { /* non-critical */ }
-  }, [])
-
-  const fetchExplicitRelationships = useCallback(async () => {
+  const fetchExplicit = useCallback(async () => {
     try {
       const res = await fetch('/api/vectorspace/explicit-relationships')
       if (res.ok) {
         const json = await res.json()
         setExplicitEdges(json.relationships || [])
       }
-    } catch { /* non-critical */ }
+    } catch {}
   }, [])
 
-  useEffect(() => { fetchProjections() }, [fetchProjections])
-  useEffect(() => { fetchRelationships() }, [fetchRelationships])
-  useEffect(() => { fetchStats() }, [fetchStats])
-  useEffect(() => { fetchExplicitRelationships() }, [fetchExplicitRelationships])
+  const fetchDetail = useCallback(async (id: number) => {
+    setDetailLoading(true)
+    try {
+      const res = await fetch(`/api/vectorspace/memory/${id}`)
+      if (res.ok) {
+        const json = await res.json()
+        setDetailContent(json.content)
+      }
+    } catch {}
+    setDetailLoading(false)
+  }, [])
 
-  // Resize observer
-  useEffect(() => {
-    const svg = svgRef.current
-    if (!svg) return
-    const obs = new ResizeObserver(entries => {
-      for (const entry of entries) {
-        const w = entry.contentRect.width
-        if (w > 0) setDimensions({ width: w, height: Math.max(520, Math.round(w * 0.55)) })
+  useEffect(() => { fetchData() }, [fetchData])
+  useEffect(() => { fetchEdges() }, [fetchEdges])
+  useEffect(() => { fetchExplicit() }, [fetchExplicit])
+
+  // Prepare chart data with jitter
+  const chartData = useMemo(() => {
+    if (!data?.projections) return null
+    
+    const width = 900
+    const height = 600
+    const margin = { top: 20, right: 20, bottom: 20, left: 20 }
+    const plotWidth = width - margin.left - margin.right
+    const plotHeight = height - margin.top - margin.bottom
+    
+    const projs = data.projections
+    const xExtent = d3.extent(projs, p => p[0]) as [number, number]
+    const yExtent = d3.extent(projs, p => p[1]) as [number, number]
+    
+    // Add padding
+    const xPadding = (xExtent[1] - xExtent[0]) * 0.05
+    const yPadding = (yExtent[1] - yExtent[0]) * 0.05
+    
+    const xScale = d3.scaleLinear()
+      .domain([xExtent[0] - xPadding, xExtent[1] + xPadding])
+      .range([0, plotWidth])
+    
+    const yScale = d3.scaleLinear()
+      .domain([yExtent[1] + yPadding, yExtent[0] - yPadding])  // Flip Y
+      .range([0, plotHeight])
+    
+    // Apply jitter based on repulsion strength
+    const jitterAmount = repulsionStrength * 20
+    const points = data.points.map((point, i) => {
+      const baseX = xScale(projs[i][0])
+      const baseY = yScale(projs[i][1])
+      
+      // Add random jitter
+      const jitterX = (Math.random() - 0.5) * jitterAmount
+      const jitterY = (Math.random() - 0.5) * jitterAmount
+      
+      return {
+        ...point,
+        x: baseX + jitterX,
+        y: baseY + jitterY,
+        r: 4 + (point.importance * 3),
+        color: getColor(point, colorBy, clusters?.[i])
       }
     })
-    obs.observe(svg)
-    return () => obs.disconnect()
-  }, [])
+    
+    // Transform edges to coordinates
+    const pointMap = new Map(points.map((p, i) => [p.id, { ...p, index: i }]))
+    const edgeLines = edges
+      .map(edge => {
+        const source = pointMap.get(edge.source)
+        const target = pointMap.get(edge.target)
+        if (!source || !target) return null
+        return { source, target, similarity: edge.similarity }
+      })
+      .filter(Boolean) as { source: typeof points[0], target: typeof points[0], similarity: number }[]
+    
+    return { points, edges: edgeLines, width, height, margin, plotWidth, plotHeight }
+  }, [data, edges, colorBy, clusters, repulsionStrength])
+
+  // Setup D3 zoom - must be after chartData declaration
+  useEffect(() => {
+    if (!svgRef.current || !chartData) return
+    
+    const svg = d3.select(svgRef.current)
+    const zoom = d3.zoom<SVGSVGElement, unknown>()
+      .scaleExtent([0.1, 10])
+      .on('zoom', (event) => {
+        setTransform(event.transform)
+      })
+      .on('end', () => {
+        // Ensure we re-render after zoom ends
+        setTransform(d3.zoomTransform(svgRef.current!))
+      })
+    
+    svg.call(zoom as any)
+    
+    // Double-click to reset
+    svg.on('dblclick.zoom', () => {
+      svg.transition().duration(300).call(zoom.transform as any, d3.zoomIdentity)
+      setTransform(d3.zoomIdentity)
+    })
+    
+    return () => {
+      svg.on('.zoom', null)
+      svg.on('dblclick.zoom', null)
+    }
+  }, [chartData])
 
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!query.trim()) return
     setSearching(true)
     try {
-      const res = await fetch('/api/vectorspace/search', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          query: query,
-          top_k: 20,
-          namespace: namespaceFilter || undefined,
-        }),
-      })
+      const res = await fetch(`/api/vectorspace/search?query=${encodeURIComponent(query)}&top_k=20${namespaceFilter ? `&namespace=${namespaceFilter}` : ''}`, { method: 'POST' })
       if (!res.ok) throw new Error('Search failed')
       const json = await res.json()
       setSearchResults(json.results || [])
@@ -290,595 +324,443 @@ function VectorSpace() {
     }
   }
 
-  const handlePointClick = async (point: any) => {
-    setSelectedPoint(point)
-    setDetailLoading(true)
-    try {
-      const res = await fetch(`/api/vectorspace/memory/${point.id}`)
-      if (res.ok) {
-        const detail = await res.json()
-        setDetailContent(detail.content)
-      }
-    } catch { /* ignore */ }
-    setDetailLoading(false)
-  }
+  const highlightedIds = useMemo(() => new Set(searchResults.map(r => r.id)), [searchResults])
 
-  const handleSvgMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
-    if (!svgRef.current) return
-    const rect = svgRef.current.getBoundingClientRect()
-    const x = e.clientX - rect.left
-    const y = e.clientY - rect.top
-
-    // Find closest point
-    let closestIdx = -1
-    let closestDist = Infinity
-    chartData.points.forEach((p, i) => {
-      const dist = Math.hypot(p.cx - x, p.cy - y)
-      if (dist < POINT_RADIUS + 8 && dist < closestDist) {
-        closestIdx = i
-        closestDist = dist
-      }
-    })
-
-    if (closestIdx >= 0) {
-      const p = chartData.points[closestIdx]
-      setHoveredPoint(p.id)
-      setTooltipPos({ x: p.cx, y: p.cy, point: p })
-    } else {
-      setHoveredPoint(null)
-      setTooltipPos(null)
+  const selectedExplicitEdges = useMemo(() => {
+    if (!selectedPoint) return { outgoing: [] as ExplicitEdge[], incoming: [] as ExplicitEdge[] }
+    return {
+      outgoing: explicitEdges.filter(e => e.source_doc_id === selectedPoint.doc_id),
+      incoming: explicitEdges.filter(e => e.target_doc_id === selectedPoint.doc_id)
     }
-  }
+  }, [selectedPoint, explicitEdges])
 
   return (
-    <div className="space-y-6">
-      {/* Header Card */}
-      <div className="rounded-2xl bg-white/[0.03] border border-white/[0.06] p-6 backdrop-blur-xl">
+    <div ref={containerRef} className="min-h-screen bg-[#0a0a0f] text-gray-300">
+      {/* Header */}
+      <header className="sticky top-0 z-50 backdrop-blur-xl bg-[#0a0a0f]/80 border-b border-white/[0.06] px-6 py-4">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-violet-500/10 flex items-center justify-center text-violet-400 text-lg">◈</div>
+            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-violet-500 to-cyan-500 flex items-center justify-center">
+              <span className="text-white font-bold">◈</span>
+            </div>
             <div>
-              <h2 className="text-lg font-semibold text-white">VectorSpace</h2>
-              <p className="text-sm text-gray-500">
-                Spatial map of memory relationships
-                {stats && (
-                  <span className="text-gray-400"> — {stats.total_memories} memories, {edges.length} connections</span>
-                )}
+              <h1 className="text-lg font-semibold text-white tracking-tight">VectorSpace</h1>
+              <p className="text-xs text-gray-500">
+                ACE Memory Visualizer
+                {data && ` • ${data.count} memories • ${algorithm.toUpperCase()}`}
+                {!umapAvailable && <span className="text-amber-400 ml-2">(UMAP unavailable)</span>}
               </p>
             </div>
           </div>
-          <button
-            onClick={() => { fetchProjections(); fetchRelationships(); fetchStats(); fetchExplicitRelationships(); }}
-            className="px-3 py-1.5 text-sm bg-white/[0.04] border border-white/[0.08] rounded-lg text-gray-400 hover:bg-white/[0.08] hover:text-white transition-all"
-          >
-            ↻ Refresh
-          </button>
-        </div>
-      </div>
-
-      {/* Controls */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-        {/* Search */}
-        <div className="md:col-span-2 rounded-2xl bg-white/[0.03] border border-white/[0.06] p-4 backdrop-blur-xl">
-          <form onSubmit={handleSearch} className="flex gap-2">
-            <input
-              type="text"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search memories... (semantic)"
-              className="flex-1 px-3 py-2 bg-white/[0.04] border border-white/[0.08] rounded-lg text-sm text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-cyan-500/30 focus:border-cyan-500/30 transition-all"
-            />
+          <div className="flex items-center gap-3">
             <button
-              type="submit"
-              disabled={searching}
-              className="px-4 py-2 bg-cyan-500 text-black font-medium rounded-lg text-sm hover:bg-cyan-400 disabled:opacity-50 transition-all"
+              onClick={() => { fetchData(); fetchEdges(); fetchExplicit(); }}
+              className="px-3 py-1.5 text-sm bg-white/[0.04] border border-white/[0.08] rounded-lg hover:bg-white/[0.08] transition-all"
             >
-              {searching ? '...' : 'Search'}
+              ↻ Refresh
             </button>
-            {searchResults.length > 0 && (
-              <button
-                type="button"
-                onClick={() => { setSearchResults([]); setQuery('') }}
-                className="px-3 py-2 text-sm text-gray-500 hover:text-gray-300 transition-colors"
-              >
-                ✕
-              </button>
-            )}
-          </form>
-          {searchResults.length > 0 && (
-            <div className="mt-2 text-xs text-gray-500">
-              {searchResults.length} results highlighted on map
-            </div>
-          )}
+          </div>
         </div>
+      </header>
 
-        {/* Filters */}
-        <div className="rounded-2xl bg-white/[0.03] border border-white/[0.06] p-4 backdrop-blur-xl space-y-3">
-          <div>
-            <label className="text-[11px] font-medium text-gray-500 uppercase tracking-wider">Color by</label>
-            <div className="flex gap-2 mt-1.5">
+      {/* Main Content */}
+      <div className="flex">
+        {/* Sidebar Controls */}
+        <div className="w-80 border-r border-white/[0.06] p-4 space-y-6 overflow-y-auto max-h-[calc(100vh-80px)]">
+          {/* Search */}
+          <div className="space-y-2">
+            <label className="text-[11px] font-medium text-gray-500 uppercase tracking-wider">Search</label>
+            <form onSubmit={handleSearch} className="flex gap-2">
+              <input
+                type="text"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Semantic search..."
+                className="flex-1 px-3 py-2 bg-white/[0.04] border border-white/[0.08] rounded-lg text-sm text-white placeholder-gray-600 focus:outline-none focus:border-cyan-500/30"
+              />
               <button
-                onClick={() => setColorBy('namespace')}
-                className={`px-3 py-1 text-xs rounded-lg transition-all ${
-                  colorBy === 'namespace'
-                    ? 'bg-cyan-500/15 text-cyan-400 border border-cyan-500/30'
-                    : 'bg-white/[0.04] text-gray-500 border border-white/[0.06] hover:text-gray-300'
+                type="submit"
+                disabled={searching}
+                className="px-3 py-2 bg-cyan-500 text-black font-medium rounded-lg text-sm hover:bg-cyan-400 disabled:opacity-50"
+              >
+                {searching ? '...' : 'Go'}
+              </button>
+            </form>
+            {searchResults.length > 0 && (
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-gray-500">{searchResults.length} results</span>
+                <button onClick={() => { setSearchResults([]); setQuery(''); }} className="text-xs text-gray-500 hover:text-gray-300">Clear</button>
+              </div>
+            )}
+          </div>
+
+          {/* Algorithm */}
+          <div className="space-y-2">
+            <label className="text-[11px] font-medium text-gray-500 uppercase tracking-wider">Projection</label>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setAlgorithm('umap')}
+                className={`flex-1 px-3 py-2 text-sm rounded-lg border transition-all ${
+                  algorithm === 'umap'
+                    ? 'bg-violet-500/20 border-violet-500/40 text-violet-300'
+                    : 'bg-white/[0.04] border-white/[0.08] text-gray-400 hover:text-gray-200'
                 }`}
               >
-                Namespace
+                UMAP
               </button>
               <button
-                onClick={() => setColorBy('category')}
-                className={`px-3 py-1 text-xs rounded-lg transition-all ${
-                  colorBy === 'category'
-                    ? 'bg-violet-500/15 text-violet-400 border border-violet-500/30'
-                    : 'bg-white/[0.04] text-gray-500 border border-white/[0.06] hover:text-gray-300'
+                onClick={() => setAlgorithm('pca')}
+                className={`flex-1 px-3 py-2 text-sm rounded-lg border transition-all ${
+                  algorithm === 'pca'
+                    ? 'bg-violet-500/20 border-violet-500/40 text-violet-300'
+                    : 'bg-white/[0.04] border-white/[0.08] text-gray-400 hover:text-gray-200'
                 }`}
               >
-                Category
+                PCA
               </button>
             </div>
           </div>
-          <div>
-            <label className="text-[11px] font-medium text-gray-500 uppercase tracking-wider">Namespace</label>
+
+          {/* Color By */}
+          <div className="space-y-2">
+            <label className="text-[11px] font-medium text-gray-500 uppercase tracking-wider">Color By</label>
+            <div className="flex flex-wrap gap-2">
+              {(['namespace', 'category', 'cluster'] as const).map((mode) => (
+                <button
+                  key={mode}
+                  onClick={() => setColorBy(mode)}
+                  className={`px-3 py-1.5 text-xs rounded-lg border transition-all ${
+                    colorBy === mode
+                      ? 'bg-cyan-500/20 border-cyan-500/40 text-cyan-300'
+                      : 'bg-white/[0.04] border-white/[0.08] text-gray-400 hover:text-gray-200'
+                  }`}
+                >
+                  {mode.charAt(0).toUpperCase() + mode.slice(1)}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Sliders */}
+          <div className="space-y-4">
+            <div>
+              <div className="flex justify-between">
+                <label className="text-[11px] font-medium text-gray-500 uppercase tracking-wider">Repulsion</label>
+                <span className="text-xs text-gray-400">{repulsionStrength.toFixed(1)}</span>
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="2"
+                step="0.1"
+                value={repulsionStrength}
+                onChange={(e) => setRepulsionStrength(parseFloat(e.target.value))}
+                className="w-full mt-2 accent-cyan-500"
+              />
+            </div>
+            
+            <div>
+              <div className="flex justify-between">
+                <label className="text-[11px] font-medium text-gray-500 uppercase tracking-wider">Similarity Threshold</label>
+                <span className="text-xs text-gray-400">{similarThreshold.toFixed(2)}</span>
+              </div>
+              <input
+                type="range"
+                min="0.3"
+                max="0.95"
+                step="0.05"
+                value={similarThreshold}
+                onChange={(e) => setSimilarThreshold(parseFloat(e.target.value))}
+                className="w-full mt-2 accent-cyan-500"
+              />
+            </div>
+
+            {colorBy === 'cluster' && (
+              <div>
+                <div className="flex justify-between">
+                  <label className="text-[11px] font-medium text-gray-500 uppercase tracking-wider">Clusters</label>
+                  <span className="text-xs text-gray-400">{clusterCount}</span>
+                </div>
+                <input
+                  type="range"
+                  min="2"
+                  max="15"
+                  step="1"
+                  value={clusterCount}
+                  onChange={(e) => setClusterCount(parseInt(e.target.value))}
+                  className="w-full mt-2 accent-violet-500"
+                />
+              </div>
+            )}
+          </div>
+
+          {/* Toggles */}
+          <div className="space-y-2">
+            <label className="text-[11px] font-medium text-gray-500 uppercase tracking-wider">Display</label>
+            <div className="space-y-2">
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={showEdges}
+                  onChange={(e) => setShowEdges(e.target.checked)}
+                  className="rounded border-white/[0.08] bg-white/[0.04] text-cyan-500 focus:ring-cyan-500/30"
+                />
+                <span className="text-sm text-gray-400">Show Similarity Edges</span>
+              </label>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={showExplicit}
+                  onChange={(e) => setShowExplicit(e.target.checked)}
+                  className="rounded border-white/[0.08] bg-white/[0.04] text-amber-500 focus:ring-amber-500/30"
+                />
+                <span className="text-sm text-gray-400">Show Explicit Relations</span>
+              </label>
+            </div>
+          </div>
+
+          {/* Filter */}
+          <div className="space-y-2">
+            <label className="text-[11px] font-medium text-gray-500 uppercase tracking-wider">Namespace Filter</label>
             <input
               type="text"
               value={namespaceFilter}
               onChange={(e) => setNamespaceFilter(e.target.value)}
-              placeholder="all"
-              className="w-full mt-1.5 px-3 py-1.5 bg-white/[0.04] border border-white/[0.08] rounded-lg text-sm text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-cyan-500/30 transition-all"
+              placeholder="e.g., screensprout"
+              className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.08] rounded-lg text-sm text-white placeholder-gray-600 focus:outline-none focus:border-cyan-500/30"
             />
           </div>
-          <div className="flex items-center justify-between">
-            <label className="text-[11px] font-medium text-gray-500 uppercase tracking-wider">Edges</label>
-            <button
-              onClick={() => setShowEdges(!showEdges)}
-              className={`relative w-10 h-5 rounded-full transition-colors ${
-                showEdges ? 'bg-cyan-500/40' : 'bg-white/[0.08]'
-              }`}
-            >
-              <div className={`absolute top-0.5 w-4 h-4 rounded-full transition-all ${
-                showEdges ? 'left-5 bg-cyan-400' : 'left-0.5 bg-gray-500'
-              }`} />
-            </button>
+
+          {/* Instructions */}
+          <div className="p-3 rounded-lg bg-white/[0.03] border border-white/[0.06] text-xs text-gray-500 space-y-1">
+            <p><strong>Scroll</strong> to zoom</p>
+            <p><strong>Drag</strong> to pan</p>
+            <p><strong>Click</strong> a point for details</p>
+            <p><strong>Double-click</strong> to reset view</p>
           </div>
-          <div className="flex items-center justify-between">
-            <label className="text-[11px] font-medium text-gray-500 uppercase tracking-wider">Explicit</label>
-            <button
-              onClick={() => setShowExplicit(!showExplicit)}
-              className={`relative w-10 h-5 rounded-full transition-colors ${
-                showExplicit ? 'bg-amber-500/40' : 'bg-white/[0.08]'
-              }`}
-            >
-              <div className={`absolute top-0.5 w-4 h-4 rounded-full transition-all ${
-                showExplicit ? 'left-5 bg-amber-400' : 'left-0.5 bg-gray-500'
-              }`} />
-            </button>
-          </div>
-          {showEdges && (
-            <div>
-              <label className="text-[11px] font-medium text-gray-500 uppercase tracking-wider">
-                Similarity ≥ {similarThreshold.toFixed(2)}
-              </label>
-              <input
-                type="range"
-                min={0.3}
-                max={0.95}
-                step={0.05}
-                value={similarThreshold}
-                onChange={(e) => setSimilarThreshold(parseFloat(e.target.value))}
-                className="w-full mt-1 accent-cyan-500"
-              />
+        </div>
+
+        {/* Visualization */}
+        <div className="flex-1 p-6">
+          {loading && (
+            <div className="flex items-center justify-center h-96 text-gray-500">
+              <div className="animate-spin mr-3">◌</div>
+              Loading projections...
+            </div>
+          )}
+          
+          {error && (
+            <div className="flex items-center justify-center h-96 text-red-400">
+              Error: {error}
+            </div>
+          )}
+          
+          {chartData && (
+            <div className="relative">
+              <svg
+                ref={svgRef}
+                width={chartData.width}
+                height={chartData.height}
+                className="bg-[#0d0d12] rounded-xl border border-white/[0.06] cursor-move"
+              >
+                <g transform={`translate(${chartData.margin.left},${chartData.margin.top}) ${transform.toString()}`}>
+                  {/* Grid */}
+                  <defs>
+                    <pattern id="grid" width="50" height="50" patternUnits="userSpaceOnUse">
+                      <path d="M 50 0 L 0 0 0 50" fill="none" stroke="rgba(255,255,255,0.03)" strokeWidth="1"/>
+                    </pattern>
+                  </defs>
+                  <rect width={chartData.plotWidth} height={chartData.plotHeight} fill="url(#grid)" />
+                  
+                  {/* Edges */}
+                  {showEdges && chartData.edges.map((edge, i) => (
+                    <line
+                      key={`edge-${i}`}
+                      x1={edge.source.x}
+                      y1={edge.source.y}
+                      x2={edge.target.x}
+                      y2={edge.target.y}
+                      stroke="rgba(99,102,241,0.15)"
+                      strokeWidth={1 + edge.similarity}
+                      opacity={0.3 + edge.similarity * 0.5}
+                    />
+                  ))}
+                  
+                  {/* Points */}
+                  {chartData.points.map((point) => {
+                    const isHighlighted = highlightedIds.has(point.id)
+                    const isHovered = hoveredPoint === point.id
+                    const isSelected = selectedPoint?.id === point.id
+                    
+                    return (
+                      <g
+                        key={point.id}
+                        transform={`translate(${point.x},${point.y})`}
+                        onMouseEnter={() => setHoveredPoint(point.id)}
+                        onMouseLeave={() => setHoveredPoint(null)}
+                        onClick={() => { setSelectedPoint(point); fetchDetail(point.id); }}
+                        style={{ cursor: 'pointer' }}
+                      >
+                        {/* Glow */}
+                        {(isHighlighted || isHovered || isSelected) && (
+                          <circle
+                            r={point.r * 2}
+                            fill={point.color}
+                            opacity={0.2}
+                            className={isSelected ? 'animate-pulse' : ''}
+                          />
+                        )}
+                        {/* Main point */}
+                        <circle
+                          r={isHighlighted ? point.r * 1.5 : point.r}
+                          fill={point.color}
+                          stroke={isSelected ? '#fff' : 'rgba(0,0,0,0.5)'}
+                          strokeWidth={isSelected ? 2 : 1}
+                          opacity={isHighlighted ? 1 : 0.8}
+                        />
+                      </g>
+                    )
+                  })}
+                  
+                  {/* Explicit edges (dashed) */}
+                  {showExplicit && explicitEdges.map((edge, i) => {
+                    const source = chartData.points.find(p => p.doc_id === edge.source_doc_id)
+                    const target = chartData.points.find(p => p.doc_id === edge.target_doc_id)
+                    if (!source || !target) return null
+                    return (
+                      <line
+                        key={`explicit-${i}`}
+                        x1={source.x}
+                        y1={source.y}
+                        x2={target.x}
+                        y2={target.y}
+                        stroke="#f59e0b"
+                        strokeWidth={1.5}
+                        strokeDasharray="4,4"
+                        opacity={0.6}
+                      />
+                    )
+                  })}
+                </g>
+                
+                {/* Zoom level indicator */}
+                <text x={10} y={20} fill="rgba(255,255,255,0.3)" fontSize={12}>
+                  Zoom: {(transform.k * 100).toFixed(0)}%
+                </text>
+              </svg>
+              
+              {/* Tooltip */}
+              {hoveredPoint && chartData && (
+                (() => {
+                  const point = chartData.points.find(p => p.id === hoveredPoint)
+                  if (!point) return null
+                  return (
+                    <div
+                      className="absolute pointer-events-none bg-[#1a1a24] border border-white/[0.08] rounded-lg p-3 shadow-xl z-10 max-w-xs"
+                      style={{
+                        left: point.x * transform.k + transform.x + chartData.margin.left + 10,
+                        top: point.y * transform.k + transform.y + chartData.margin.top - 10
+                      }}
+                    >
+                      <div className="text-xs text-gray-400 mb-1">{point.namespace}</div>
+                      <div className="text-sm text-white line-clamp-3">{point.content_summary}</div>
+                      <div className="flex gap-2 mt-2">
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/[0.08] text-gray-400">{point.category}</span>
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/[0.08] text-gray-400">⭐ {point.importance.toFixed(1)}</span>
+                      </div>
+                    </div>
+                  )
+                })()
+              )}
             </div>
           )}
         </div>
       </div>
 
-      {/* Error */}
-      {error && (
-        <div className="p-4 bg-red-500/10 border border-red-500/20 text-red-400 rounded-2xl text-sm">{error}</div>
-      )}
-
-      {/* SVG Visualization */}
-      <div className="rounded-2xl bg-white/[0.03] border border-white/[0.06] p-4 backdrop-blur-xl">
-        {loading ? (
-          <div className="flex items-center justify-center h-96">
-            <div className="text-center">
-              <div className="w-8 h-8 border-2 border-cyan-500/30 border-t-cyan-400 rounded-full animate-spin mx-auto mb-3" />
-              <div className="text-gray-400">Computing UMAP projection...</div>
-              <div className="text-xs text-gray-600 mt-1">This may take a moment</div>
-            </div>
-          </div>
-        ) : chartData.points.length === 0 ? (
-          <div className="flex items-center justify-center h-96">
-            <div className="text-center">
-              <div className="text-3xl mb-3">◈</div>
-              <div className="text-gray-500">No memory data to display</div>
-            </div>
-          </div>
-        ) : (
-          <div className="relative">
-            <svg
-              ref={svgRef}
-              width="100%"
-              height={dimensions.height}
-              viewBox={`0 0 ${dimensions.width} ${dimensions.height}`}
-              className="block"
-              onMouseMove={handleSvgMouseMove}
-              onMouseLeave={() => { setHoveredPoint(null); setTooltipPos(null) }}
-            >
-              {/* Background */}
-              <rect width={dimensions.width} height={dimensions.height} fill="transparent" />
-
-              {/* Grid lines */}
-              {Array.from({ length: 9 }).map((_, i) => {
-                const x = MARGIN + (i + 1) * ((dimensions.width - MARGIN * 2) / 10)
-                const y = MARGIN + (i + 1) * ((dimensions.height - MARGIN * 2) / 10)
-                return (
-                  <g key={i}>
-                    <line x1={x} y1={MARGIN} x2={x} y2={dimensions.height - MARGIN} stroke="rgba(255,255,255,0.03)" strokeWidth={1} />
-                    <line x1={MARGIN} y1={y} x2={dimensions.width - MARGIN} y2={y} stroke="rgba(255,255,255,0.03)" strokeWidth={1} />
-                  </g>
-                )
-              })}
-
-              {/* Relationship edges (background) */}
-              {showEdges && edges.map((edge, i) => {
-                const srcIdx = idToIndex.get(edge.source)
-                const tgtIdx = idToIndex.get(edge.target)
-                if (srcIdx === undefined || tgtIdx === undefined) return null
-                const src = chartData.points[srcIdx]
-                const tgt = chartData.points[tgtIdx]
-                if (!src || !tgt) return null
-
-                const isActive = activeEdges.some(ae => ae.source === edge.source && ae.target === edge.target)
-                const opacity = isActive
-                  ? 0.6 + edge.similarity * 0.3
-                  : 0.03 + edge.similarity * 0.07
-
-                return (
-                  <line
-                    key={`e-${i}`}
-                    x1={src.cx}
-                    y1={src.cy}
-                    x2={tgt.cx}
-                    y2={tgt.cy}
-                    stroke={isActive ? src.fill : 'rgba(255,255,255,0.4)'}
-                    strokeWidth={isActive ? 1.5 : 0.5}
-                    opacity={opacity}
-                    strokeDasharray={isActive ? undefined : '2,4'}
-                  />
-                )
-              })}
-
-              {/* Active edges (foreground, when hovering/selecting) */}
-              {activeEdges.map((edge, i) => {
-                const srcIdx = idToIndex.get(edge.source)
-                const tgtIdx = idToIndex.get(edge.target)
-                if (srcIdx === undefined || tgtIdx === undefined) return null
-                const src = chartData.points[srcIdx]
-                const tgt = chartData.points[tgtIdx]
-                if (!src || !tgt) return null
-
-                return (
-                  <line
-                    key={`ae-${i}`}
-                    x1={src.cx}
-                    y1={src.cy}
-                    x2={tgt.cx}
-                    y2={tgt.cy}
-                    stroke={src.fill}
-                    strokeWidth={1.5}
-                    opacity={0.5 + edge.similarity * 0.4}
-                  />
-                )
-              })}
-
-              {/* Explicit relationship edges (dashed amber lines) */}
-              {showExplicit && explicitEdges.map((edge, i) => {
-                const srcIdx = docIdToIndex.get(edge.source_doc_id)
-                const tgtIdx = docIdToIndex.get(edge.target_doc_id)
-                if (srcIdx === undefined || tgtIdx === undefined) return null
-                const src = chartData.points[srcIdx]
-                const tgt = chartData.points[tgtIdx]
-                if (!src || !tgt) return null
-
-                const activeDocId = selectedPoint?.doc_id ?? (hoveredPoint !== null ? chartData.points[idToIndex.get(hoveredPoint) ?? -1]?.doc_id : null)
-                const isActive = activeDocId !== null && (edge.source_doc_id === activeDocId || edge.target_doc_id === activeDocId)
-                const isHoveredEdge = hoveredExplicitIdx === i
-
-                const midX = (src.cx + tgt.cx) / 2
-                const midY = (src.cy + tgt.cy) / 2
-
-                return (
-                  <g key={`ex-${i}`}>
-                    <line
-                      x1={src.cx}
-                      y1={src.cy}
-                      x2={tgt.cx}
-                      y2={tgt.cy}
-                      stroke="#f59e0b"
-                      strokeWidth={isActive || isHoveredEdge ? 2 : 1}
-                      strokeDasharray="6 4"
-                      opacity={isActive || isHoveredEdge ? 0.8 : 0.3}
-                    />
-                    {(isActive || isHoveredEdge) && (
-                      <g
-                        onMouseEnter={() => setHoveredExplicitIdx(i)}
-                        onMouseLeave={() => setHoveredExplicitIdx(null)}
-                      >
-                        <rect
-                          x={midX - edge.rel_type.length * 3.5 - 4}
-                          y={midY - 8}
-                          width={edge.rel_type.length * 7 + 8}
-                          height={16}
-                          rx={4}
-                          fill="rgba(245,158,11,0.9)"
-                          stroke="rgba(245,158,11,0.5)"
-                          strokeWidth={1}
-                        />
-                        <text
-                          x={midX}
-                          y={midY + 1}
-                          textAnchor="middle"
-                          dominantBaseline="central"
-                          fill="#000"
-                          fontSize={9}
-                          fontWeight={600}
-                          style={{ pointerEvents: 'none' }}
-                        >
-                          {edge.rel_type}
-                        </text>
-                      </g>
-                    )}
-                  </g>
-                )
-              })}
-
-              {/* Points */}
-              {chartData.points.map((point, i) => {
-                const isHighlighted = highlightedIds.has(point.id)
-                const isHovered = hoveredPoint === point.id
-                const isSelected = selectedPoint?.id === point.id
-                const isConnected = activeEdges.some(e => e.source === point.id || e.target === point.id)
-                const r = isHovered || isSelected ? POINT_RADIUS + 3
-                  : isHighlighted ? POINT_RADIUS + 2
-                  : isConnected ? POINT_RADIUS + 1
-                  : POINT_RADIUS
-
-                return (
-                  <g key={`p-${i}`} onClick={() => handlePointClick(point)} style={{ cursor: 'pointer' }}>
-                    {/* Glow for highlighted/hovered */}
-                    {(isHovered || isSelected || isHighlighted) && (
-                      <circle
-                        cx={point.cx}
-                        cy={point.cy}
-                        r={r + 4}
-                        fill={point.fill}
-                        opacity={0.15}
-                      />
-                    )}
-                    <circle
-                      cx={point.cx}
-                      cy={point.cy}
-                      r={r}
-                      fill={isHighlighted ? '#fbbf24' : point.fill}
-                      stroke={isHighlighted ? '#92400e' : isSelected ? '#fff' : 'rgba(255,255,255,0.15)'}
-                      strokeWidth={isHighlighted ? 2 : isSelected ? 2 : 1}
-                      opacity={isHovered || isSelected ? 1 : isHighlighted ? 1 : 0.75}
-                    />
-                  </g>
-                )
-              })}
-
-              {/* Axis labels */}
-              <text x={dimensions.width / 2} y={dimensions.height - 6} textAnchor="middle" fill="#4b5563" fontSize={10}>UMAP-1</text>
-              <text x={8} y={dimensions.height / 2} textAnchor="middle" fill="#4b5563" fontSize={10} transform={`rotate(-90, 12, ${dimensions.height / 2})`}>UMAP-2</text>
-            </svg>
-
-            {/* Tooltip */}
-            {tooltipPos && hoveredPoint !== null && (
-              <div
-                className="absolute pointer-events-none bg-[#1a1a2e] p-3 rounded-xl border border-white/10 text-xs max-w-xs shadow-xl shadow-black/40 z-10"
-                style={{
-                  left: Math.min(tooltipPos.x + 12, dimensions.width - 200),
-                  top: Math.max(tooltipPos.y - 60, 10),
-                }}
-              >
-                <div className="font-semibold text-white truncate">{tooltipPos.point.content_summary}</div>
-                <div className="text-gray-400 mt-1.5 flex items-center gap-1.5">
-                  <span className="inline-block w-2 h-2 rounded-full" style={{ background: getColor(tooltipPos.point, colorBy) }} />
-                  {tooltipPos.point.namespace} / {tooltipPos.point.category}
-                </div>
-                {tooltipPos.point.source && <div className="text-gray-500 mt-1">Source: {tooltipPos.point.source}</div>}
-                <div className="text-gray-500 mt-1 flex gap-3">
-                  <span>Imp: {tooltipPos.point.importance}</span>
-                  <span>Access: {tooltipPos.point.access_count}</span>
-                </div>
-                {activeEdges.length > 0 && (
-                  <div className="text-cyan-400 mt-1">{activeEdges.length} connection{activeEdges.length !== 1 ? 's' : ''}</div>
-                )}
-              </div>
-            )}
-
-            {/* Edge count badge */}
-            {((showEdges && edges.length > 0) || (showExplicit && explicitEdges.length > 0)) && (
-              <div className="absolute top-2 right-2 text-xs text-gray-500 bg-white/[0.04] px-2 py-1 rounded-lg border border-white/[0.06] flex gap-2">
-                {showEdges && edges.length > 0 && (
-                  <span>{edges.length} edges{edgesLoading && <span className="ml-1 animate-pulse">...</span>}</span>
-                )}
-                {showExplicit && explicitEdges.length > 0 && (
-                  <span className="text-amber-400/70">{explicitEdges.length} explicit</span>
-                )}
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-
-      {/* Search Results */}
-      {searchResults.length > 0 && (
-        <div className="rounded-2xl bg-white/[0.03] border border-white/[0.06] backdrop-blur-xl overflow-hidden">
-          <div className="px-6 py-3 border-b border-white/[0.06] bg-white/[0.02]">
-            <span className="text-sm font-medium text-white">
-              Search Results: &quot;{query}&quot;
-            </span>
-          </div>
-          <div className="divide-y divide-white/[0.04] max-h-64 overflow-y-auto">
-            {searchResults.map((r) => (
-              <div
-                key={r.id}
-                className="px-6 py-3 hover:bg-white/[0.02] cursor-pointer transition-colors"
-                onClick={() => {
-                  handlePointClick({ id: r.id, content_summary: r.content, namespace: r.namespace, category: r.category } as MemoryPoint)
-                  const idx = idToIndex.get(r.id)
-                  if (idx !== undefined && chartData.points[idx]) {
-                    setHoveredPoint(r.id)
-                  }
-                }}
-              >
-                <div className="flex items-center gap-2 mb-1">
-                  <span className="text-xs px-1.5 py-0.5 rounded bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">
-                    {r.namespace}
-                  </span>
-                  <span className="text-xs px-1.5 py-0.5 rounded bg-violet-500/10 text-violet-400 border border-violet-500/20">
-                    {r.category}
-                  </span>
-                  <span className="text-xs font-mono text-emerald-400">
-                    {(r.similarity * 100).toFixed(1)}%
-                  </span>
-                </div>
-                <div className="text-sm text-gray-300 line-clamp-2">{r.content}</div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
       {/* Detail Panel */}
       {selectedPoint && (
-        <div className="rounded-2xl bg-white/[0.03] border border-white/[0.06] p-6 backdrop-blur-xl">
-          <div className="flex items-start justify-between mb-4">
-            <div>
-              <h3 className="font-semibold text-white">Memory Detail</h3>
-              <div className="flex gap-2 mt-2">
-                <span className="text-xs px-2 py-0.5 rounded-lg bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">
-                  {selectedPoint.namespace}
-                </span>
-                <span className="text-xs px-2 py-0.5 rounded-lg bg-violet-500/10 text-violet-400 border border-violet-500/20">
-                  {selectedPoint.category}
-                </span>
-                {selectedPoint.source && (
-                  <span className="text-xs px-2 py-0.5 rounded-lg bg-white/[0.04] text-gray-400 border border-white/[0.06]">
-                    {selectedPoint.source}
-                  </span>
-                )}
-              </div>
-            </div>
+        <div className="fixed right-0 top-20 bottom-0 w-96 bg-[#0d0d12] border-l border-white/[0.06] p-6 overflow-y-auto z-40 shadow-2xl">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-semibold text-white">Memory Detail</h3>
             <button
-              onClick={() => { setSelectedPoint(null); setDetailContent(null) }}
-              className="text-gray-500 hover:text-white transition-colors text-lg"
+              onClick={() => { setSelectedPoint(null); setDetailContent(null); }}
+              className="text-gray-500 hover:text-white transition-colors"
             >
               ✕
             </button>
           </div>
-          <div className="text-sm text-gray-300 whitespace-pre-wrap leading-relaxed">
+          
+          <div className="space-y-4">
+            <div className="flex gap-2">
+              <span className="px-2 py-1 rounded bg-violet-500/20 text-violet-300 text-xs">{selectedPoint.namespace}</span>
+              <span className="px-2 py-1 rounded bg-cyan-500/20 text-cyan-300 text-xs">{selectedPoint.category}</span>
+            </div>
+            
+            <div>
+              <label className="text-[11px] text-gray-500 uppercase">Content Preview</label>
+              <p className="text-sm text-gray-300 mt-1 leading-relaxed">{selectedPoint.content_preview}</p>
+            </div>
+            
             {detailLoading ? (
-              <span className="text-gray-500">Loading...</span>
-            ) : (detailContent || selectedPoint.content_summary)}
-          </div>
-          <div className="mt-4 flex gap-4 text-xs text-gray-500">
-            <span>ID: {selectedPoint.id}</span>
-            <span>Importance: {selectedPoint.importance}</span>
-            <span>Access: {selectedPoint.access_count}</span>
-            {selectedPoint.created_at && <span>Created: {selectedPoint.created_at}</span>}
-          </div>
-
-          {/* Connected memories */}
-          {activeEdges.length > 0 && (
-            <div className="mt-4 pt-4 border-t border-white/[0.06]">
-              <h4 className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-2">Connected Memories</h4>
-              <div className="space-y-1.5">
-                {activeEdges.slice(0, 8).map((edge, i) => {
-                  const otherId = edge.source === selectedPoint.id ? edge.target : edge.source
-                  const otherPoint = chartData.points[idToIndex.get(otherId) ?? -1]
-                  if (!otherPoint) return null
-                  return (
-                    <div
-                      key={i}
-                      className="flex items-center gap-2 text-sm cursor-pointer hover:bg-white/[0.02] rounded-lg px-2 py-1 transition-colors"
-                      onClick={() => handlePointClick(otherPoint)}
-                    >
-                      <span className="inline-block w-2 h-2 rounded-full" style={{ background: getColor(otherPoint, colorBy) }} />
-                      <span className="text-gray-300 truncate flex-1">{otherPoint.content_summary}</span>
-                      <span className="text-xs font-mono text-cyan-400">{(edge.similarity * 100).toFixed(0)}%</span>
+              <div className="text-sm text-gray-500">Loading full content...</div>
+            ) : detailContent ? (
+              <div>
+                <label className="text-[11px] text-gray-500 uppercase">Full Content</label>
+                <pre className="mt-1 p-3 bg-black/30 rounded-lg text-xs text-gray-400 overflow-x-auto whitespace-pre-wrap">{detailContent}</pre>
+              </div>
+            ) : null}
+            
+            <div className="grid grid-cols-2 gap-3 text-sm">
+              <div>
+                <label className="text-[11px] text-gray-500 uppercase">Importance</label>
+                <div className="text-white">{selectedPoint.importance.toFixed(2)}</div>
+              </div>
+              <div>
+                <label className="text-[11px] text-gray-500 uppercase">Access Count</label>
+                <div className="text-white">{selectedPoint.access_count}</div>
+              </div>
+              <div>
+                <label className="text-[11px] text-gray-500 uppercase">Doc ID</label>
+                <div className="text-gray-400 font-mono text-xs truncate">{selectedPoint.doc_id}</div>
+              </div>
+              {selectedPoint.source && (
+                <div>
+                  <label className="text-[11px] text-gray-500 uppercase">Source</label>
+                  <div className="text-gray-400 text-xs truncate">{selectedPoint.source}</div>
+                </div>
+              )}
+            </div>
+            
+            {selectedPoint.tags && selectedPoint.tags.length > 0 && (
+              <div>
+                <label className="text-[11px] text-gray-500 uppercase">Tags</label>
+                <div className="flex flex-wrap gap-1 mt-1">
+                  {selectedPoint.tags.map((tag, i) => (
+                    <span key={i} className="px-2 py-0.5 rounded bg-white/[0.06] text-gray-400 text-xs">{tag}</span>
+                  ))}
+                </div>
+              </div>
+            )}
+            
+            {/* Explicit relationships */}
+            {(selectedExplicitEdges.outgoing.length > 0 || selectedExplicitEdges.incoming.length > 0) && (
+              <div>
+                <label className="text-[11px] text-gray-500 uppercase">Explicit Relationships</label>
+                <div className="space-y-2 mt-2">
+                  {selectedExplicitEdges.outgoing.map((edge, i) => (
+                    <div key={`out-${i}`} className="p-2 rounded bg-amber-500/10 border border-amber-500/20 text-xs">
+                      <span className="text-amber-400">→ {edge.rel_type}</span>
+                      <div className="text-gray-400 mt-1 truncate">{edge.target_summary}</div>
                     </div>
-                  )
-                })}
+                  ))}
+                  {selectedExplicitEdges.incoming.map((edge, i) => (
+                    <div key={`in-${i}`} className="p-2 rounded bg-emerald-500/10 border border-emerald-500/20 text-xs">
+                      <span className="text-emerald-400">← {edge.rel_type}</span>
+                      <div className="text-gray-400 mt-1 truncate">{edge.source_summary}</div>
+                    </div>
+                  ))}
+                </div>
               </div>
-            </div>
-          )}
-
-          {/* Explicit Relationships */}
-          {(selectedPointExplicitEdges.outgoing.length > 0 || selectedPointExplicitEdges.incoming.length > 0) && (
-            <div className="mt-4 pt-4 border-t border-white/[0.06]">
-              <h4 className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-2">Relationships</h4>
-              <div className="space-y-1.5">
-                {selectedPointExplicitEdges.outgoing.map((edge, i) => (
-                  <div
-                    key={`out-${i}`}
-                    className="flex items-center gap-2 text-sm cursor-pointer hover:bg-white/[0.02] rounded-lg px-2 py-1 transition-colors"
-                    onClick={() => {
-                      const tgtIdx = docIdToIndex.get(edge.target_doc_id)
-                      if (tgtIdx !== undefined && chartData.points[tgtIdx]) {
-                        handlePointClick(chartData.points[tgtIdx])
-                      }
-                    }}
-                  >
-                    <span className="text-amber-400 text-xs">→</span>
-                    <span className="text-xs px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20 font-medium">
-                      {edge.rel_type}
-                    </span>
-                    <span className="text-gray-300 truncate flex-1">{edge.target_summary}</span>
-                  </div>
-                ))}
-                {selectedPointExplicitEdges.incoming.map((edge, i) => (
-                  <div
-                    key={`in-${i}`}
-                    className="flex items-center gap-2 text-sm cursor-pointer hover:bg-white/[0.02] rounded-lg px-2 py-1 transition-colors"
-                    onClick={() => {
-                      const srcIdx = docIdToIndex.get(edge.source_doc_id)
-                      if (srcIdx !== undefined && chartData.points[srcIdx]) {
-                        handlePointClick(chartData.points[srcIdx])
-                      }
-                    }}
-                  >
-                    <span className="text-amber-400 text-xs">←</span>
-                    <span className="text-xs px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20 font-medium">
-                      {edge.rel_type}
-                    </span>
-                    <span className="text-gray-300 truncate flex-1">{edge.source_summary}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Legend */}
-      {chartData.points.length > 0 && (
-        <div className="rounded-2xl bg-white/[0.03] border border-white/[0.06] p-4 backdrop-blur-xl">
-          <div className="flex flex-wrap gap-x-5 gap-y-2">
-            {(colorBy === 'namespace' ? NAMESPACE_COLORS : CATEGORY_COLORS) && (
-              Object.entries(colorBy === 'namespace' ? NAMESPACE_COLORS : CATEGORY_COLORS)
-                .filter(([key]) => chartData.points.some(p => (colorBy === 'namespace' ? p.namespace : p.category) === key))
-                .map(([key, color]) => (
-                  <div key={key} className="flex items-center gap-1.5 text-xs text-gray-400">
-                    <span className="inline-block w-2.5 h-2.5 rounded-full" style={{ background: color }} />
-                    {key}
-                  </div>
-                ))
             )}
           </div>
         </div>
