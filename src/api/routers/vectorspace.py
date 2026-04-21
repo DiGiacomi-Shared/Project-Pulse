@@ -47,6 +47,20 @@ class RelationshipsResponse(BaseModel):
     error: Optional[str] = None
 
 
+class ExplicitEdgeItem(BaseModel):
+    source_doc_id: str
+    target_doc_id: str
+    rel_type: str
+    source_summary: str
+    target_summary: str
+
+
+class ExplicitRelationshipsResponse(BaseModel):
+    relationships: List[ExplicitEdgeItem]
+    count: int
+    error: Optional[str] = None
+
+
 class SearchRequest(BaseModel):
     query: str
     top_k: int = 10
@@ -126,6 +140,23 @@ async def get_relationships(
         count=result.get("count", 0),
         threshold=result.get("threshold", threshold),
         error=result.get("error"),
+    )
+
+
+@router.get("/vectorspace/explicit-relationships", response_model=ExplicitRelationshipsResponse)
+async def get_explicit_relationships():
+    """
+    Get explicit relationships from the ACE relationships table.
+
+    Returns relationships with doc_ids and content summaries, suitable for
+    rendering as labeled dashed edges on the VectorSpace visualization.
+    """
+    client = get_ace_client()
+    result = client.get_explicit_relationships()
+
+    return ExplicitRelationshipsResponse(
+        relationships=[ExplicitEdgeItem(**r) for r in result],
+        count=len(result),
     )
 
 

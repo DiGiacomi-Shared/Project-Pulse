@@ -33,6 +33,14 @@ interface Edge {
   similarity: number
 }
 
+interface ExplicitEdge {
+  source_doc_id: string
+  target_doc_id: string
+  rel_type: string
+  source_summary: string
+  target_summary: string
+}
+
 interface SearchResult {
   id: number
   doc_id: string
@@ -102,6 +110,9 @@ function VectorSpace() {
   const [namespaceFilter, setNamespaceFilter] = useState<string>('')
   const [similarThreshold, setSimilarThreshold] = useState(0.65)
   const [showEdges, setShowEdges] = useState(true)
+  const [explicitEdges, setExplicitEdges] = useState<ExplicitEdge[]>([])
+  const [showExplicit, setShowExplicit] = useState(true)
+  const [hoveredExplicitIdx, setHoveredExplicitIdx] = useState<number | null>(null)
   const [stats, setStats] = useState<Stats | null>(null)
   const [hoveredPoint, setHoveredPoint] = useState<number | null>(null)
   const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number; point: ChartPoint } | null>(null)
@@ -113,6 +124,15 @@ function VectorSpace() {
     const map = new Map<number, number>()
     if (data) {
       data.points.forEach((p, i) => map.set(p.id, i))
+    }
+    return map
+  }, [data])
+
+  // Build lookup from point doc_id -> index for explicit edge rendering
+  const docIdToIndex = useMemo(() => {
+    const map = new Map<string, number>()
+    if (data) {
+      data.points.forEach((p, i) => map.set(p.doc_id, i))
     }
     return map
   }, [data])
@@ -166,6 +186,15 @@ function VectorSpace() {
     return edges.filter(e => e.source === pid || e.target === pid)
   }, [edges, hoveredPoint, selectedPoint, showEdges])
 
+  // Explicit edges connected to selected point (for detail panel)
+  const selectedPointExplicitEdges = useMemo(() => {
+    if (!selectedPoint) return { outgoing: [] as ExplicitEdge[], incoming: [] as ExplicitEdge[] }
+    const docId = selectedPoint.doc_id
+    const outgoing = explicitEdges.filter(e => e.source_doc_id === docId)
+    const incoming = explicitEdges.filter(e => e.target_doc_id === docId)
+    return { outgoing, incoming }
+  }, [selectedPoint, explicitEdges])
+
   const fetchProjections = useCallback(async () => {
     setLoading(true)
     setError('')
@@ -208,9 +237,20 @@ function VectorSpace() {
     } catch { /* non-critical */ }
   }, [])
 
+  const fetchExplicitRelationships = useCallback(async () => {
+    try {
+      const res = await fetch('/api/vectorspace/explicit-relationships')
+      if (res.ok) {
+        const json = await res.json()
+        setExplicitEdges(json.relationships || [])
+      }
+    } catch { /* non-critical */ }
+  }, [])
+
   useEffect(() => { fetchProjections() }, [fetchProjections])
   useEffect(() => { fetchRelationships() }, [fetchRelationships])
   useEffect(() => { fetchStats() }, [fetchStats])
+  useEffect(() => { fetchExplicitRelationships() }, [fetchExplicitRelationships])
 
   // Resize observer
   useEffect(() => {
@@ -308,7 +348,7 @@ function VectorSpace() {
             </div>
           </div>
           <button
-            onClick={() => { fetchProjections(); fetchRelationships(); fetchStats(); }}
+            onClick={() => { fetchProjections(); fetchRelationships(); fetchStats(); fetchExplicitRelationships(); }}
             className="px-3 py-1.5 text-sm bg-white/[0.04] border border-white/[0.08] rounded-lg text-gray-400 hover:bg-white/[0.08] hover:text-white transition-all"
           >
             ↻ Refresh
@@ -399,6 +439,19 @@ function VectorSpace() {
             >
               <div className={`absolute top-0.5 w-4 h-4 rounded-full transition-all ${
                 showEdges ? 'left-5 bg-cyan-400' : 'left-0.5 bg-gray-500'
+              }`} />
+            </button>
+          </div>
+          <div className="flex items-center justify-between">
+            <label className="text-[11px] font-medium text-gray-500 uppercase tracking-wider">Explicit</label>
+            <button
+              onClick={() => setShowExplicit(!showExplicit)}
+              className={`relative w-10 h-5 rounded-full transition-colors ${
+                showExplicit ? 'bg-amber-500/40' : 'bg-white/[0.08]'
+              }`}
+            >
+              <div className={`absolute top-0.5 w-4 h-4 rounded-full transition-all ${
+                showExplicit ? 'left-5 bg-amber-400' : 'left-0.5 bg-gray-500'
               }`} />
             </button>
           </div>
@@ -521,6 +574,67 @@ function VectorSpace() {
                 )
               })}
 
+              {/* Explicit relationship edges (dashed amber lines) */}
+              {showExplicit && explicitEdges.map((edge, i) => {
+                const srcIdx = docIdToIndex.get(edge.source_doc_id)
+                const tgtIdx = docIdToIndex.get(edge.target_doc_id)
+                if (srcIdx === undefined || tgtIdx === undefined) return null
+                const src = chartData.points[srcIdx]
+                const tgt = chartData.points[tgtIdx]
+                if (!src || !tgt) return null
+
+                const activeDocId = selectedPoint?.doc_id ?? (hoveredPoint !== null ? chartData.points[idToIndex.get(hoveredPoint) ?? -1]?.doc_id : null)
+                const isActive = activeDocId !== null && (edge.source_doc_id === activeDocId || edge.target_doc_id === activeDocId)
+                const isHoveredEdge = hoveredExplicitIdx === i
+
+                const midX = (src.cx + tgt.cx) / 2
+                const midY = (src.cy + tgt.cy) / 2
+
+                return (
+                  <g key={`ex-${i}`}>
+                    <line
+                      x1={src.cx}
+                      y1={src.cy}
+                      x2={tgt.cx}
+                      y2={tgt.cy}
+                      stroke="#f59e0b"
+                      strokeWidth={isActive || isHoveredEdge ? 2 : 1}
+                      strokeDasharray="6 4"
+                      opacity={isActive || isHoveredEdge ? 0.8 : 0.3}
+                    />
+                    {(isActive || isHoveredEdge) && (
+                      <g
+                        onMouseEnter={() => setHoveredExplicitIdx(i)}
+                        onMouseLeave={() => setHoveredExplicitIdx(null)}
+                      >
+                        <rect
+                          x={midX - edge.rel_type.length * 3.5 - 4}
+                          y={midY - 8}
+                          width={edge.rel_type.length * 7 + 8}
+                          height={16}
+                          rx={4}
+                          fill="rgba(245,158,11,0.9)"
+                          stroke="rgba(245,158,11,0.5)"
+                          strokeWidth={1}
+                        />
+                        <text
+                          x={midX}
+                          y={midY + 1}
+                          textAnchor="middle"
+                          dominantBaseline="central"
+                          fill="#000"
+                          fontSize={9}
+                          fontWeight={600}
+                          style={{ pointerEvents: 'none' }}
+                        >
+                          {edge.rel_type}
+                        </text>
+                      </g>
+                    )}
+                  </g>
+                )
+              })}
+
               {/* Points */}
               {chartData.points.map((point, i) => {
                 const isHighlighted = highlightedIds.has(point.id)
@@ -588,10 +702,14 @@ function VectorSpace() {
             )}
 
             {/* Edge count badge */}
-            {showEdges && edges.length > 0 && (
-              <div className="absolute top-2 right-2 text-xs text-gray-500 bg-white/[0.04] px-2 py-1 rounded-lg border border-white/[0.06]">
-                {edges.length} edges
-                {edgesLoading && <span className="ml-1 animate-pulse">...</span>}
+            {((showEdges && edges.length > 0) || (showExplicit && explicitEdges.length > 0)) && (
+              <div className="absolute top-2 right-2 text-xs text-gray-500 bg-white/[0.04] px-2 py-1 rounded-lg border border-white/[0.06] flex gap-2">
+                {showEdges && edges.length > 0 && (
+                  <span>{edges.length} edges{edgesLoading && <span className="ml-1 animate-pulse">...</span>}</span>
+                )}
+                {showExplicit && explicitEdges.length > 0 && (
+                  <span className="text-amber-400/70">{explicitEdges.length} explicit</span>
+                )}
               </div>
             )}
           </div>
@@ -697,6 +815,51 @@ function VectorSpace() {
                     </div>
                   )
                 })}
+              </div>
+            </div>
+          )}
+
+          {/* Explicit Relationships */}
+          {(selectedPointExplicitEdges.outgoing.length > 0 || selectedPointExplicitEdges.incoming.length > 0) && (
+            <div className="mt-4 pt-4 border-t border-white/[0.06]">
+              <h4 className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-2">Relationships</h4>
+              <div className="space-y-1.5">
+                {selectedPointExplicitEdges.outgoing.map((edge, i) => (
+                  <div
+                    key={`out-${i}`}
+                    className="flex items-center gap-2 text-sm cursor-pointer hover:bg-white/[0.02] rounded-lg px-2 py-1 transition-colors"
+                    onClick={() => {
+                      const tgtIdx = docIdToIndex.get(edge.target_doc_id)
+                      if (tgtIdx !== undefined && chartData.points[tgtIdx]) {
+                        handlePointClick(chartData.points[tgtIdx])
+                      }
+                    }}
+                  >
+                    <span className="text-amber-400 text-xs">→</span>
+                    <span className="text-xs px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20 font-medium">
+                      {edge.rel_type}
+                    </span>
+                    <span className="text-gray-300 truncate flex-1">{edge.target_summary}</span>
+                  </div>
+                ))}
+                {selectedPointExplicitEdges.incoming.map((edge, i) => (
+                  <div
+                    key={`in-${i}`}
+                    className="flex items-center gap-2 text-sm cursor-pointer hover:bg-white/[0.02] rounded-lg px-2 py-1 transition-colors"
+                    onClick={() => {
+                      const srcIdx = docIdToIndex.get(edge.source_doc_id)
+                      if (srcIdx !== undefined && chartData.points[srcIdx]) {
+                        handlePointClick(chartData.points[srcIdx])
+                      }
+                    }}
+                  >
+                    <span className="text-amber-400 text-xs">←</span>
+                    <span className="text-xs px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20 font-medium">
+                      {edge.rel_type}
+                    </span>
+                    <span className="text-gray-300 truncate flex-1">{edge.source_summary}</span>
+                  </div>
+                ))}
               </div>
             </div>
           )}

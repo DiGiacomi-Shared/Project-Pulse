@@ -355,6 +355,58 @@ class ACEClient:
             logger.error(f"ACE compute_relationships error: {e}")
             return {"error": str(e), "edges": [], "count": 0}
 
+    def get_explicit_relationships(self) -> List[Dict]:
+        """
+        Query the explicit relationships table joined with memories
+        to get doc_ids and content summaries.
+
+        Returns: list of {
+            "source_doc_id": str,
+            "target_doc_id": str,
+            "rel_type": str,
+            "source_summary": str,
+            "target_summary": str,
+        }
+        """
+        self._ensure_conn()
+        if not self.conn:
+            return []
+
+        try:
+            from psycopg2.extras import RealDictCursor
+            with self.conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT
+                        m1.doc_id AS source_doc_id,
+                        m2.doc_id AS target_doc_id,
+                        r.rel_type,
+                        m1.content AS source_content,
+                        m2.content AS target_content
+                    FROM relationships r
+                    JOIN memories m1 ON r.source_id = m1.id
+                    JOIN memories m2 ON r.target_id = m2.id
+                    ORDER BY r.created_at DESC
+                """)
+                rows = cur.fetchall()
+
+            result = []
+            for row in rows:
+                src_content = row['source_content'] or ''
+                tgt_content = row['target_content'] or ''
+                result.append({
+                    "source_doc_id": row['source_doc_id'],
+                    "target_doc_id": row['target_doc_id'],
+                    "rel_type": row['rel_type'],
+                    "source_summary": src_content[:60] + '...' if len(src_content) > 60 else src_content,
+                    "target_summary": tgt_content[:60] + '...' if len(tgt_content) > 60 else tgt_content,
+                })
+
+            return result
+
+        except Exception as e:
+            logger.error(f"ACE get_explicit_relationships error: {e}")
+            return []
+
     def get_namespaces(self) -> List[str]:
         """Get list of distinct namespaces."""
         self._ensure_conn()
