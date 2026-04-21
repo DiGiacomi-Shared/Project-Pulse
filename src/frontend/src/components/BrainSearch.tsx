@@ -12,6 +12,12 @@ interface SearchResponse {
   total: number
 }
 
+const QUICK_SEARCHES = [
+  { query: 'authentication JWT', label: 'Auth Patterns', icon: '🔐' },
+  { query: 'impossible travel detection', label: 'Security', icon: '🛡️' },
+  { query: 'Kubernetes deployment', label: 'Infrastructure', icon: '⚙️' },
+]
+
 function BrainSearch() {
   const [query, setQuery] = useState('')
   const [results, setResults] = useState<SearchResponse | null>(null)
@@ -37,82 +43,100 @@ function BrainSearch() {
     }
   }
 
-  const getRelevanceColor = (score: number) => {
-    if (score > 0.5) return 'text-green-600'
-    if (score > 0.3) return 'text-yellow-600'
-    return 'text-gray-600'
+  const getRelevanceStyle = (score: number) => {
+    if (score > 0.5) return 'text-emerald-400'
+    if (score > 0.3) return 'text-amber-400'
+    return 'text-gray-400'
+  }
+
+  const getRelevanceBg = (score: number) => {
+    if (score > 0.5) return 'bg-emerald-500/10'
+    if (score > 0.3) return 'bg-amber-500/10'
+    return 'bg-white/[0.04]'
   }
 
   return (
     <div className="space-y-6">
-      <div className="bg-white p-6 rounded-lg shadow-sm border">
-        <h2 className="text-lg font-semibold mb-4">Brain Search</h2>
-        <p className="text-gray-600 mb-4">
-          Search across all your projects with semantic understanding. Find code, docs, and patterns.
-        </p>
+      {/* Search Card */}
+      <div className="rounded-2xl bg-white/[0.03] border border-white/[0.06] p-6 backdrop-blur-xl">
+        <div className="flex items-center gap-3 mb-4">
+          <div className="w-10 h-10 rounded-xl bg-cyan-500/10 flex items-center justify-center text-cyan-400 text-lg">⬡</div>
+          <div>
+            <h2 className="text-lg font-semibold text-white">Brain Search</h2>
+            <p className="text-sm text-gray-500">Semantic search across all your projects</p>
+          </div>
+        </div>
 
-        <form onSubmit={handleSearch} className="flex gap-2">
+        <form onSubmit={handleSearch} className="relative">
           <input
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="e.g., auth patterns, impossible travel, K8s deployment..."
-            className="flex-1 px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+            placeholder="Search for patterns, code, architecture..."
+            className="w-full px-4 py-3 bg-white/[0.04] border border-white/[0.08] rounded-xl text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-cyan-500/30 focus:border-cyan-500/30 transition-all"
           />
           <button
             type="submit"
             disabled={loading}
-            className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
+            className="absolute right-2 top-1/2 -translate-y-1/2 px-4 py-1.5 bg-cyan-500 text-black font-medium rounded-lg text-sm hover:bg-cyan-400 disabled:opacity-50 disabled:hover:bg-cyan-500 transition-all"
           >
-            {loading ? 'Searching...' : 'Search'}
+            {loading ? (
+              <span className="flex items-center gap-1.5">
+                <span className="w-3 h-3 border-2 border-black/30 border-t-black rounded-full animate-spin" />
+                Searching
+              </span>
+            ) : 'Search'}
           </button>
         </form>
 
         {error && (
-          <div className="mt-4 p-3 bg-red-50 text-red-700 rounded-lg">
+          <div className="mt-4 p-3 bg-red-500/10 border border-red-500/20 text-red-400 rounded-xl text-sm">
             {error}
           </div>
         )}
       </div>
 
+      {/* Results */}
       {results && (
-        <div className="bg-white rounded-lg shadow-sm border">
-          <div className="p-4 border-b bg-gray-50">
-            <div className="flex items-center justify-between">
-              <h3 className="font-medium">
-                Results for "{results.query}"
-              </h3>
-              <span className="text-sm text-gray-500">
-                {results.total} documents found
+        <div className="rounded-2xl bg-white/[0.03] border border-white/[0.06] backdrop-blur-xl overflow-hidden">
+          <div className="px-6 py-4 border-b border-white/[0.06] flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <h3 className="font-medium text-white">Results</h3>
+              <span className="text-xs px-2 py-0.5 rounded-full bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">
+                {results.total}
               </span>
             </div>
+            <button
+              onClick={() => { setResults(null); setQuery('') }}
+              className="text-xs text-gray-500 hover:text-gray-300 transition-colors"
+            >
+              Clear
+            </button>
           </div>
 
-          <div className="divide-y">
+          <div className="divide-y divide-white/[0.04]">
             {results.results.length === 0 ? (
-              <div className="p-8 text-center text-gray-500">
-                No results found. Try a different query.
+              <div className="p-12 text-center">
+                <div className="text-3xl mb-3">🔍</div>
+                <div className="text-gray-400">No results found</div>
+                <div className="text-sm text-gray-600 mt-1">Try a different query</div>
               </div>
             ) : (
               results.results.map((result, index) => (
-                <div key={index} className="p-4 hover:bg-gray-50">
-                  <div className="flex items-start justify-between">
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs font-medium px-2 py-1 bg-blue-100 text-blue-700 rounded">
-                          {result.project}
-                        </span>
-                        <span className={`text-xs font-mono ${getRelevanceColor(result.relevance)}`}>
-                          {(result.relevance * 100).toFixed(1)}% match
-                        </span>
-                      </div>
-                      <code className="block mt-2 text-sm text-gray-700 font-mono truncate">
-                        {result.file.split('/').slice(-3).join('/')}
-                      </code>
-                      <div className="text-xs text-gray-500 mt-1 truncate">
-                        {result.file}
-                      </div>
-                    </div>
+                <div key={index} className="px-6 py-4 hover:bg-white/[0.02] transition-colors">
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="text-xs px-2 py-0.5 rounded-md bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">
+                      {result.project}
+                    </span>
+                    <span className={`text-xs font-mono px-2 py-0.5 rounded-md ${getRelevanceBg(result.relevance)} ${getRelevanceStyle(result.relevance)}`}>
+                      {(result.relevance * 100).toFixed(1)}%
+                    </span>
+                  </div>
+                  <code className="block text-sm text-gray-300 font-mono truncate">
+                    {result.file.split('/').slice(-3).join('/')}
+                  </code>
+                  <div className="text-xs text-gray-600 mt-1 truncate">
+                    {result.file}
                   </div>
                 </div>
               ))
@@ -123,21 +147,18 @@ function BrainSearch() {
 
       {/* Quick searches */}
       {!results && (
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          {[
-            { query: 'authentication JWT', label: 'Auth Patterns' },
-            { query: 'impossible travel detection', label: 'Security' },
-            { query: 'Kubernetes deployment', label: 'Infrastructure' },
-          ].map((suggestion) => (
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          {QUICK_SEARCHES.map((suggestion) => (
             <button
               key={suggestion.query}
               onClick={() => {
                 setQuery(suggestion.query)
                 handleSearch({ preventDefault: () => {} } as React.FormEvent)
               }}
-              className="p-4 text-left bg-white rounded-lg border hover:border-blue-500 hover:shadow-sm transition-all"
+              className="group text-left p-5 rounded-2xl bg-white/[0.03] border border-white/[0.06] hover:border-cyan-500/20 hover:bg-white/[0.05] transition-all duration-300"
             >
-              <div className="font-medium text-gray-900">{suggestion.label}</div>
+              <div className="text-2xl mb-3">{suggestion.icon}</div>
+              <div className="font-medium text-white group-hover:text-cyan-400 transition-colors">{suggestion.label}</div>
               <div className="text-sm text-gray-500 mt-1">{suggestion.query}</div>
             </button>
           ))}
