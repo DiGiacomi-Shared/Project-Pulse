@@ -1,5 +1,6 @@
 """
 VectorSpace visualizer endpoints for ACE memory data.
+Includes relationship/edge computation for showing connections between memories.
 """
 
 from fastapi import APIRouter, Query, HTTPException
@@ -30,6 +31,19 @@ class VectorSpaceResponse(BaseModel):
     points: list
     projections: list
     count: int
+    error: Optional[str] = None
+
+
+class EdgeItem(BaseModel):
+    source: int
+    target: int
+    similarity: float
+
+
+class RelationshipsResponse(BaseModel):
+    edges: List[EdgeItem]
+    count: int
+    threshold: float
     error: Optional[str] = None
 
 
@@ -86,6 +100,31 @@ async def get_projections(
         points=result.get("points", []),
         projections=result.get("projections", []),
         count=result.get("count", 0),
+        error=result.get("error"),
+    )
+
+
+@router.get("/vectorspace/relationships", response_model=RelationshipsResponse)
+async def get_relationships(
+    namespace: Optional[str] = Query(None, description="Filter by namespace"),
+    threshold: float = Query(0.65, description="Minimum cosine similarity for an edge"),
+):
+    """
+    Compute relationship edges between memories based on cosine similarity.
+
+    Returns pairs of memory IDs whose embeddings are above the similarity threshold.
+    Used to draw connection lines on the VectorSpace scatter plot.
+    """
+    client = get_ace_client()
+    result = client.compute_relationships(namespace=namespace, threshold=threshold)
+
+    if result.get("error"):
+        raise HTTPException(status_code=503, detail=result["error"])
+
+    return RelationshipsResponse(
+        edges=[EdgeItem(**e) for e in result.get("edges", [])],
+        count=result.get("count", 0),
+        threshold=result.get("threshold", threshold),
         error=result.get("error"),
     )
 

@@ -262,6 +262,99 @@ class ACEClient:
             logger.error(f"ACE get_memory error: {e}")
             return None
 
+    def compute_relationships(self, namespace: Optional[str] = None, threshold: float = 0.65) -> Dict:
+        """
+        Compute relationship edges between memories based on cosine similarity.
+
+        Uses pgvector's cosine distance operator (<=>) to find pairs of memories
+        whose similarity exceeds the threshold. Only computes within the same
+        namespace to keep edges meaningful.
+
+        Returns: {"edges": [{"source": id, "target": id, "similarity": float}, ...], "count": int}
+        """
+        self._ensure_conn()
+        if not self.conn:
+            return {"error": "ACE not connected", "edges": [], "count": 0}
+
+        try:
+            from psycopg2.extras import RealDictCursor
+            with self.conn.cursor(cursor_factory=RealDictCursor) as cur:
+                # Self-join on memories to find pairs with high cosine similarity
+                # Use pgvector <=> operator (cosine distance: 0=identical, 2=opposite)
+                # similarity = 1 - distance
+                sql = """
+                    SELECT 
+                        m1.id as source,
+                        m2.id as target,
+                        1 - (m1.embedding <=> m2.embedding) as similarity
+                    FROM memories m1
+                    JOIN memories m2 ON m1.id < m2.id
+                        AND 1 - (m1.embedding <=> m2.embedding) >= %s
+                    WHERE m1.embedding IS NOT NULL 
+                      AND m2.embedding IS NOT NULL
+                """
+                params = [threshold]
+
+                if namespace:
+                    sql += " AND m1.namespace = %s AND m2.namespace = %s"
+                    params.extend([namespace, namespace])
+                else:
+                    # Only connect within same namespace for clarity
+                    sql += " AND m1.namespace = m2.namespace"
+
+                # Also connect same-category cross-namespace at a lower threshold
+                # to show inter-namespace links
+                sql2 = """
+                    SELECT
+                        m1.id as source,
+                        m2.id as target,
+                        1 - (m1.embedding <=> m2.embedding) as similarity
+                    FROM memories m1
+                    JOIN memories m2 ON m1.id < m2.id
+                        AND m1.namespace != m2.namespace
+                        AND 1 - (m1.embedding <=> m2.embedding) >= %s
+                    WHERE m1.embedding IS NOT NULL
+                      AND m2.embedding IS NOT NULL
+                """
+                cross_ns_threshold = min(threshold + 0.1, 0.95)
+
+                if namespace:
+                    sql2 = sql2.replace("WHERE", f"WHERE m1.namespace = %s AND m2.namespace != %s AND")
+                    # We skip cross-namespace if filtering to one namespace
+                    rows_cross = []
+                else:
+                    cur.execute(sql2, [cross_ns_threshold])
+                    rows_cross = cur.fetchall()
+
+                cur.execute(sql, params)
+                rows_within = cur.fetchall()
+
+                edges = []
+                seen = set()
+                for row in rows_within + rows_cross:
+                    key = (row['source'], row['target'])
+                    if key not in seen:
+                        seen.add(key)
+                        edges.append({
+                            "source": row['source'],
+                            "target": row['target'],
+                            "similarity": round(float(row['similarity']), 4),
+                        })
+
+                # Sort by similarity descending, limit to top 200 edges
+                edges.sort(key=lambda x: x['similarity'], reverse=True)
+                edges = edges[:200]
+
+            return {
+                "edges": edges,
+                "count": len(edges),
+                "threshold": threshold,
+            }
+
+        except Exception as e:
+            logger.error(f"ACE compute_relationships error: {e}")
+            return {"error": str(e), "edges": [], "count": 0}
+
     def get_namespaces(self) -> List[str]:
         """Get list of distinct namespaces."""
         self._ensure_conn()

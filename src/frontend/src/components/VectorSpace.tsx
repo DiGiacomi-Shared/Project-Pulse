@@ -1,8 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
-import {
-  ScatterChart, Scatter, XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer, Cell, ZAxis
-} from 'recharts'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 
 interface MemoryPoint {
   id: number
@@ -23,6 +19,12 @@ interface ProjectionData {
   projections: number[][]
   count: number
   error?: string
+}
+
+interface Edge {
+  source: number
+  target: number
+  similarity: number
 }
 
 interface SearchResult {
@@ -46,19 +48,26 @@ interface Stats {
 
 const NAMESPACE_COLORS: Record<string, string> = {
   default: '#6366f1',
-  specterdefence: '#ef4444',
-  'screen-sprout': '#22c55e',
+  screensprout: '#22c55e',
+  'context-engine': '#f59e0b',
+  'ai-automation': '#3b82f6',
+  'project-pulse': '#ec4899',
   infra: '#f59e0b',
   docs: '#3b82f6',
 }
 
 const CATEGORY_COLORS: Record<string, string> = {
-  general: '#8b5cf6',
+  credentials: '#ef4444',
   infra: '#f59e0b',
-  security: '#ef4444',
-  code: '#22c55e',
-  docs: '#3b82f6',
-  conversation: '#ec4899',
+  architecture: '#22c55e',
+  product: '#3b82f6',
+  project: '#8b5cf6',
+  overview: '#ec4899',
+  operational: '#f97316',
+  deployment: '#06b6d4',
+  troubleshooting: '#eab308',
+  debug: '#ef4444',
+  user: '#a855f7',
 }
 
 function getColor(point: MemoryPoint, colorBy: 'namespace' | 'category'): string {
@@ -68,9 +77,14 @@ function getColor(point: MemoryPoint, colorBy: 'namespace' | 'category'): string
   return CATEGORY_COLORS[point.category] || '#94a3b8'
 }
 
+const MARGIN = 40
+const POINT_RADIUS = 6
+
 function VectorSpace() {
   const [data, setData] = useState<ProjectionData | null>(null)
+  const [edges, setEdges] = useState<Edge[]>([])
   const [loading, setLoading] = useState(false)
+  const [edgesLoading, setEdgesLoading] = useState(false)
   const [error, setError] = useState('')
   const [query, setQuery] = useState('')
   const [searchResults, setSearchResults] = useState<SearchResult[]>([])
@@ -80,21 +94,71 @@ function VectorSpace() {
   const [detailContent, setDetailContent] = useState<string | null>(null)
   const [colorBy, setColorBy] = useState<'namespace' | 'category'>('namespace')
   const [namespaceFilter, setNamespaceFilter] = useState<string>('')
+  const [similarThreshold, setSimilarThreshold] = useState(0.65)
+  const [showEdges, setShowEdges] = useState(true)
   const [stats, setStats] = useState<Stats | null>(null)
+  const [hoveredPoint, setHoveredPoint] = useState<number | null>(null)
+  const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number; point: MemoryPoint } | null>(null)
+  const svgRef = useRef<SVGSVGElement>(null)
+  const [dimensions, setDimensions] = useState({ width: 900, height: 520 })
 
-  const chartData = data
-    ? data.points.map((point, i) => {
-        const proj = data.projections[i] || [0, 0]
-        return {
-          ...point,
-          x: proj[0],
-          y: proj[1],
-          fill: getColor(point, colorBy),
-        }
-      })
-    : []
+  // Build lookup from point id -> index
+  const idToIndex = useMemo(() => {
+    const map = new Map<number, number>()
+    if (data) {
+      data.points.forEach((p, i) => map.set(p.id, i))
+    }
+    return map
+  }, [data])
 
-  const highlightedIds = new Set(searchResults.map(r => r.id))
+  // Compute chart data with canvas coordinates
+  const chartData = useMemo(() => {
+    if (!data || !data.projections.length) return { points: [], xRange: [0, 1], yRange: [0, 1] }
+
+    const projs = data.projections
+    let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity
+    for (const p of projs) {
+      if (p[0] < xMin) xMin = p[0]
+      if (p[0] > xMax) xMax = p[0]
+      if (p[1] < yMin) yMin = p[1]
+      if (p[1] > yMax) yMax = p[1]
+    }
+
+    // Add padding
+    const xPad = Math.max((xMax - xMin) * 0.1, 0.5)
+    const yPad = Math.max((yMax - yMin) * 0.1, 0.5)
+    xMin -= xPad; xMax += xPad
+    yMin -= yPad; yMax += yPad
+
+    const plotW = dimensions.width - MARGIN * 2
+    const plotH = dimensions.height - MARGIN * 2
+
+    const points = data.points.map((point, i) => {
+      const proj = projs[i] || [0, 0]
+      const cx = MARGIN + ((proj[0] - xMin) / (xMax - xMin)) * plotW
+      const cy = MARGIN + ((proj[1] - yMin) / (yMax - yMin)) * plotH
+      return {
+        ...point,
+        cx,
+        cy,
+        fill: getColor(point, colorBy),
+      }
+    })
+
+    return { points, xRange: [xMin, xMax], yRange: [yMin, yMax] }
+  }, [data, colorBy, dimensions])
+
+  const highlightedIds = useMemo(
+    () => new Set(searchResults.map(r => r.id)),
+    [searchResults]
+  )
+
+  // Edges connected to hovered/selected point
+  const activeEdges = useMemo(() => {
+    const pid = hoveredPoint ?? (selectedPoint?.id ?? null)
+    if (pid === null || !showEdges) return []
+    return edges.filter(e => e.source === pid || e.target === pid)
+  }, [edges, hoveredPoint, selectedPoint, showEdges])
 
   const fetchProjections = useCallback(async () => {
     setLoading(true)
@@ -113,6 +177,24 @@ function VectorSpace() {
     }
   }, [namespaceFilter])
 
+  const fetchRelationships = useCallback(async () => {
+    if (!showEdges) return
+    setEdgesLoading(true)
+    try {
+      const params = new URLSearchParams()
+      params.set('threshold', similarThreshold.toString())
+      if (namespaceFilter) params.set('namespace', namespaceFilter)
+      const res = await fetch(`/api/vectorspace/relationships?${params}`)
+      if (!res.ok) throw new Error('Failed to load relationships')
+      const json = await res.json()
+      setEdges(json.edges || [])
+    } catch {
+      setEdges([])
+    } finally {
+      setEdgesLoading(false)
+    }
+  }, [namespaceFilter, similarThreshold, showEdges])
+
   const fetchStats = useCallback(async () => {
     try {
       const res = await fetch('/api/vectorspace/stats')
@@ -121,7 +203,22 @@ function VectorSpace() {
   }, [])
 
   useEffect(() => { fetchProjections() }, [fetchProjections])
+  useEffect(() => { fetchRelationships() }, [fetchRelationships])
   useEffect(() => { fetchStats() }, [fetchStats])
+
+  // Resize observer
+  useEffect(() => {
+    const svg = svgRef.current
+    if (!svg) return
+    const obs = new ResizeObserver(entries => {
+      for (const entry of entries) {
+        const w = entry.contentRect.width
+        if (w > 0) setDimensions({ width: w, height: Math.max(520, Math.round(w * 0.55)) })
+      }
+    })
+    obs.observe(svg)
+    return () => obs.disconnect()
+  }, [])
 
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -160,23 +257,29 @@ function VectorSpace() {
     setDetailLoading(false)
   }
 
-  const CustomTooltip = ({ active, payload }: any) => {
-    if (!active || !payload || !payload.length) return null
-    const point = payload[0].payload
-    return (
-      <div className="bg-[#1a1a2e] p-3 rounded-xl border border-white/10 text-xs max-w-xs shadow-xl shadow-black/40">
-        <div className="font-semibold text-white truncate">{point.content_summary}</div>
-        <div className="text-gray-400 mt-1.5 flex items-center gap-1.5">
-          <span className="inline-block w-2 h-2 rounded-full" style={{ background: point.fill }} />
-          {point.namespace} / {point.category}
-        </div>
-        {point.source && <div className="text-gray-500 mt-1">Source: {point.source}</div>}
-        <div className="text-gray-500 mt-1 flex gap-3">
-          <span>Imp: {point.importance}</span>
-          <span>Access: {point.access_count}</span>
-        </div>
-      </div>
-    )
+  const handleSvgMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
+    if (!svgRef.current) return
+    const rect = svgRef.current.getBoundingClientRect()
+    const x = e.clientX - rect.left
+    const y = e.clientY - rect.top
+
+    // Find closest point
+    let closest: { idx: number; dist: number } | null = null
+    chartData.points.forEach((p, i) => {
+      const dist = Math.hypot(p.cx - x, p.cy - y)
+      if (dist < POINT_RADIUS + 8) {
+        if (!closest || dist < closest.dist) closest = { idx: i, dist }
+      }
+    })
+
+    if (closest) {
+      const p = chartData.points[closest.idx]
+      setHoveredPoint(p.id)
+      setTooltipPos({ x: p.cx, y: p.cy, point: p })
+    } else {
+      setHoveredPoint(null)
+      setTooltipPos(null)
+    }
   }
 
   return (
@@ -189,15 +292,15 @@ function VectorSpace() {
             <div>
               <h2 className="text-lg font-semibold text-white">VectorSpace</h2>
               <p className="text-sm text-gray-500">
-                Spatial visualization of ACE memory embeddings
+                Spatial map of memory relationships
                 {stats && (
-                  <span className="text-gray-400"> — {stats.total_memories} memories across {Object.keys(stats.by_namespace || {}).length} namespaces</span>
+                  <span className="text-gray-400"> — {stats.total_memories} memories, {edges.length} connections</span>
                 )}
               </p>
             </div>
           </div>
           <button
-            onClick={() => { fetchProjections(); fetchStats(); }}
+            onClick={() => { fetchProjections(); fetchRelationships(); fetchStats(); }}
             className="px-3 py-1.5 text-sm bg-white/[0.04] border border-white/[0.08] rounded-lg text-gray-400 hover:bg-white/[0.08] hover:text-white transition-all"
           >
             ↻ Refresh
@@ -214,7 +317,7 @@ function VectorSpace() {
               type="text"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search memories... (Ollama nomic-embed-text)"
+              placeholder="Search memories... (semantic)"
               className="flex-1 px-3 py-2 bg-white/[0.04] border border-white/[0.08] rounded-lg text-sm text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-cyan-500/30 focus:border-cyan-500/30 transition-all"
             />
             <button
@@ -274,10 +377,39 @@ function VectorSpace() {
               type="text"
               value={namespaceFilter}
               onChange={(e) => setNamespaceFilter(e.target.value)}
-              placeholder="e.g., default"
+              placeholder="all"
               className="w-full mt-1.5 px-3 py-1.5 bg-white/[0.04] border border-white/[0.08] rounded-lg text-sm text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-cyan-500/30 transition-all"
             />
           </div>
+          <div className="flex items-center justify-between">
+            <label className="text-[11px] font-medium text-gray-500 uppercase tracking-wider">Edges</label>
+            <button
+              onClick={() => setShowEdges(!showEdges)}
+              className={`relative w-10 h-5 rounded-full transition-colors ${
+                showEdges ? 'bg-cyan-500/40' : 'bg-white/[0.08]'
+              }`}
+            >
+              <div className={`absolute top-0.5 w-4 h-4 rounded-full transition-all ${
+                showEdges ? 'left-5 bg-cyan-400' : 'left-0.5 bg-gray-500'
+              }`} />
+            </button>
+          </div>
+          {showEdges && (
+            <div>
+              <label className="text-[11px] font-medium text-gray-500 uppercase tracking-wider">
+                Similarity ≥ {similarThreshold.toFixed(2)}
+              </label>
+              <input
+                type="range"
+                min={0.3}
+                max={0.95}
+                step={0.05}
+                value={similarThreshold}
+                onChange={(e) => setSimilarThreshold(parseFloat(e.target.value))}
+                className="w-full mt-1 accent-cyan-500"
+              />
+            </div>
+          )}
         </div>
       </div>
 
@@ -286,7 +418,7 @@ function VectorSpace() {
         <div className="p-4 bg-red-500/10 border border-red-500/20 text-red-400 rounded-2xl text-sm">{error}</div>
       )}
 
-      {/* Scatter Plot */}
+      {/* SVG Visualization */}
       <div className="rounded-2xl bg-white/[0.03] border border-white/[0.06] p-4 backdrop-blur-xl">
         {loading ? (
           <div className="flex items-center justify-center h-96">
@@ -296,7 +428,7 @@ function VectorSpace() {
               <div className="text-xs text-gray-600 mt-1">This may take a moment</div>
             </div>
           </div>
-        ) : chartData.length === 0 ? (
+        ) : chartData.points.length === 0 ? (
           <div className="flex items-center justify-center h-96">
             <div className="text-center">
               <div className="text-3xl mb-3">◈</div>
@@ -304,45 +436,157 @@ function VectorSpace() {
             </div>
           </div>
         ) : (
-          <ResponsiveContainer width="100%" height={500}>
-            <ScatterChart margin={{ top: 20, right: 20, bottom: 20, left: 20 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
-              <XAxis
-                type="number"
-                dataKey="x"
-                name="UMAP-1"
-                tick={{ fontSize: 10, fill: '#6b7280' }}
-                axisLine={{ stroke: 'rgba(255,255,255,0.06)' }}
-                tickLine={{ stroke: 'rgba(255,255,255,0.06)' }}
-              />
-              <YAxis
-                type="number"
-                dataKey="y"
-                name="UMAP-2"
-                tick={{ fontSize: 10, fill: '#6b7280' }}
-                axisLine={{ stroke: 'rgba(255,255,255,0.06)' }}
-                tickLine={{ stroke: 'rgba(255,255,255,0.06)' }}
-              />
-              <ZAxis range={[36, 36]} />
-              <Tooltip content={<CustomTooltip />} cursor={{ stroke: 'rgba(255,255,255,0.1)' }} />
-              <Scatter
-                name="Memories"
-                data={chartData}
-                onClick={handlePointClick}
-                cursor="pointer"
-              >
-                {chartData.map((entry, index) => (
-                  <Cell
-                    key={`cell-${index}`}
-                    fill={highlightedIds.has(entry.id) ? '#fbbf24' : entry.fill}
-                    stroke={highlightedIds.has(entry.id) ? '#92400e' : 'rgba(255,255,255,0.15)'}
-                    strokeWidth={highlightedIds.has(entry.id) ? 2 : 1}
-                    opacity={highlightedIds.has(entry.id) ? 1 : 0.7}
+          <div className="relative">
+            <svg
+              ref={svgRef}
+              width="100%"
+              height={dimensions.height}
+              viewBox={`0 0 ${dimensions.width} ${dimensions.height}`}
+              className="block"
+              onMouseMove={handleSvgMouseMove}
+              onMouseLeave={() => { setHoveredPoint(null); setTooltipPos(null) }}
+            >
+              {/* Background */}
+              <rect width={dimensions.width} height={dimensions.height} fill="transparent" />
+
+              {/* Grid lines */}
+              {Array.from({ length: 9 }).map((_, i) => {
+                const x = MARGIN + (i + 1) * ((dimensions.width - MARGIN * 2) / 10)
+                const y = MARGIN + (i + 1) * ((dimensions.height - MARGIN * 2) / 10)
+                return (
+                  <g key={i}>
+                    <line x1={x} y1={MARGIN} x2={x} y2={dimensions.height - MARGIN} stroke="rgba(255,255,255,0.03)" strokeWidth={1} />
+                    <line x1={MARGIN} y1={y} x2={dimensions.width - MARGIN} y2={y} stroke="rgba(255,255,255,0.03)" strokeWidth={1} />
+                  </g>
+                )
+              })}
+
+              {/* Relationship edges (background) */}
+              {showEdges && edges.map((edge, i) => {
+                const srcIdx = idToIndex.get(edge.source)
+                const tgtIdx = idToIndex.get(edge.target)
+                if (srcIdx === undefined || tgtIdx === undefined) return null
+                const src = chartData.points[srcIdx]
+                const tgt = chartData.points[tgtIdx]
+                if (!src || !tgt) return null
+
+                const isActive = activeEdges.some(ae => ae.source === edge.source && ae.target === edge.target)
+                const opacity = isActive
+                  ? 0.6 + edge.similarity * 0.3
+                  : 0.03 + edge.similarity * 0.07
+
+                return (
+                  <line
+                    key={`e-${i}`}
+                    x1={src.cx}
+                    y1={src.cy}
+                    x2={tgt.cx}
+                    y2={tgt.cy}
+                    stroke={isActive ? src.fill : 'rgba(255,255,255,0.4)'}
+                    strokeWidth={isActive ? 1.5 : 0.5}
+                    opacity={opacity}
+                    strokeDasharray={isActive ? undefined : '2,4'}
                   />
-                ))}
-              </Scatter>
-            </ScatterChart>
-          </ResponsiveContainer>
+                )
+              })}
+
+              {/* Active edges (foreground, when hovering/selecting) */}
+              {activeEdges.map((edge, i) => {
+                const srcIdx = idToIndex.get(edge.source)
+                const tgtIdx = idToIndex.get(edge.target)
+                if (srcIdx === undefined || tgtIdx === undefined) return null
+                const src = chartData.points[srcIdx]
+                const tgt = chartData.points[tgtIdx]
+                if (!src || !tgt) return null
+
+                return (
+                  <line
+                    key={`ae-${i}`}
+                    x1={src.cx}
+                    y1={src.cy}
+                    x2={tgt.cx}
+                    y2={tgt.cy}
+                    stroke={src.fill}
+                    strokeWidth={1.5}
+                    opacity={0.5 + edge.similarity * 0.4}
+                  />
+                )
+              })}
+
+              {/* Points */}
+              {chartData.points.map((point, i) => {
+                const isHighlighted = highlightedIds.has(point.id)
+                const isHovered = hoveredPoint === point.id
+                const isSelected = selectedPoint?.id === point.id
+                const isConnected = activeEdges.some(e => e.source === point.id || e.target === point.id)
+                const r = isHovered || isSelected ? POINT_RADIUS + 3
+                  : isHighlighted ? POINT_RADIUS + 2
+                  : isConnected ? POINT_RADIUS + 1
+                  : POINT_RADIUS
+
+                return (
+                  <g key={`p-${i}`} onClick={() => handlePointClick(point)} style={{ cursor: 'pointer' }}>
+                    {/* Glow for highlighted/hovered */}
+                    {(isHovered || isSelected || isHighlighted) && (
+                      <circle
+                        cx={point.cx}
+                        cy={point.cy}
+                        r={r + 4}
+                        fill={point.fill}
+                        opacity={0.15}
+                      />
+                    )}
+                    <circle
+                      cx={point.cx}
+                      cy={point.cy}
+                      r={r}
+                      fill={isHighlighted ? '#fbbf24' : point.fill}
+                      stroke={isHighlighted ? '#92400e' : isSelected ? '#fff' : 'rgba(255,255,255,0.15)'}
+                      strokeWidth={isHighlighted ? 2 : isSelected ? 2 : 1}
+                      opacity={isHovered || isSelected ? 1 : isHighlighted ? 1 : 0.75}
+                    />
+                  </g>
+                )
+              })}
+
+              {/* Axis labels */}
+              <text x={dimensions.width / 2} y={dimensions.height - 6} textAnchor="middle" fill="#4b5563" fontSize={10}>UMAP-1</text>
+              <text x={8} y={dimensions.height / 2} textAnchor="middle" fill="#4b5563" fontSize={10} transform={`rotate(-90, 12, ${dimensions.height / 2})`}>UMAP-2</text>
+            </svg>
+
+            {/* Tooltip */}
+            {tooltipPos && hoveredPoint !== null && (
+              <div
+                className="absolute pointer-events-none bg-[#1a1a2e] p-3 rounded-xl border border-white/10 text-xs max-w-xs shadow-xl shadow-black/40 z-10"
+                style={{
+                  left: Math.min(tooltipPos.x + 12, dimensions.width - 200),
+                  top: Math.max(tooltipPos.y - 60, 10),
+                }}
+              >
+                <div className="font-semibold text-white truncate">{tooltipPos.point.content_summary}</div>
+                <div className="text-gray-400 mt-1.5 flex items-center gap-1.5">
+                  <span className="inline-block w-2 h-2 rounded-full" style={{ background: tooltipPos.point.fill }} />
+                  {tooltipPos.point.namespace} / {tooltipPos.point.category}
+                </div>
+                {tooltipPos.point.source && <div className="text-gray-500 mt-1">Source: {tooltipPos.point.source}</div>}
+                <div className="text-gray-500 mt-1 flex gap-3">
+                  <span>Imp: {tooltipPos.point.importance}</span>
+                  <span>Access: {tooltipPos.point.access_count}</span>
+                </div>
+                {activeEdges.length > 0 && (
+                  <div className="text-cyan-400 mt-1">{activeEdges.length} connection{activeEdges.length !== 1 ? 's' : ''}</div>
+                )}
+              </div>
+            )}
+
+            {/* Edge count badge */}
+            {showEdges && edges.length > 0 && (
+              <div className="absolute top-2 right-2 text-xs text-gray-500 bg-white/[0.04] px-2 py-1 rounded-lg border border-white/[0.06]">
+                {edges.length} edges
+                {edgesLoading && <span className="ml-1 animate-pulse">...</span>}
+              </div>
+            )}
+          </div>
         )}
       </div>
 
@@ -359,7 +603,13 @@ function VectorSpace() {
               <div
                 key={r.id}
                 className="px-6 py-3 hover:bg-white/[0.02] cursor-pointer transition-colors"
-                onClick={() => handlePointClick({ id: r.id, content_summary: r.content, namespace: r.namespace, category: r.category })}
+                onClick={() => {
+                  handlePointClick({ id: r.id, content_summary: r.content, namespace: r.namespace, category: r.category } as MemoryPoint)
+                  const idx = idToIndex.get(r.id)
+                  if (idx !== undefined && chartData.points[idx]) {
+                    setHoveredPoint(r.id)
+                  }
+                }}
               >
                 <div className="flex items-center gap-2 mb-1">
                   <span className="text-xs px-1.5 py-0.5 rounded bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">
@@ -416,6 +666,49 @@ function VectorSpace() {
             <span>Importance: {selectedPoint.importance}</span>
             <span>Access: {selectedPoint.access_count}</span>
             {selectedPoint.created_at && <span>Created: {selectedPoint.created_at}</span>}
+          </div>
+
+          {/* Connected memories */}
+          {activeEdges.length > 0 && (
+            <div className="mt-4 pt-4 border-t border-white/[0.06]">
+              <h4 className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-2">Connected Memories</h4>
+              <div className="space-y-1.5">
+                {activeEdges.slice(0, 8).map((edge, i) => {
+                  const otherId = edge.source === selectedPoint.id ? edge.target : edge.source
+                  const otherPoint = chartData.points[idToIndex.get(otherId) ?? -1]
+                  if (!otherPoint) return null
+                  return (
+                    <div
+                      key={i}
+                      className="flex items-center gap-2 text-sm cursor-pointer hover:bg-white/[0.02] rounded-lg px-2 py-1 transition-colors"
+                      onClick={() => handlePointClick(otherPoint)}
+                    >
+                      <span className="inline-block w-2 h-2 rounded-full" style={{ background: otherPoint.fill }} />
+                      <span className="text-gray-300 truncate flex-1">{otherPoint.content_summary}</span>
+                      <span className="text-xs font-mono text-cyan-400">{(edge.similarity * 100).toFixed(0)}%</span>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Legend */}
+      {chartData.points.length > 0 && (
+        <div className="rounded-2xl bg-white/[0.03] border border-white/[0.06] p-4 backdrop-blur-xl">
+          <div className="flex flex-wrap gap-x-5 gap-y-2">
+            {(colorBy === 'namespace' ? NAMESPACE_COLORS : CATEGORY_COLORS) && (
+              Object.entries(colorBy === 'namespace' ? NAMESPACE_COLORS : CATEGORY_COLORS)
+                .filter(([key]) => chartData.points.some(p => (colorBy === 'namespace' ? p.namespace : p.category) === key))
+                .map(([key, color]) => (
+                  <div key={key} className="flex items-center gap-1.5 text-xs text-gray-400">
+                    <span className="inline-block w-2.5 h-2.5 rounded-full" style={{ background: color }} />
+                    {key}
+                  </div>
+                ))
+            )}
           </div>
         </div>
       )}
