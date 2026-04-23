@@ -20,7 +20,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: digiacomi-shared/project-pulse-api
+  IMAGE_NAME: michaeldigiacomi/project-pulse-api
 
 jobs:
   # ============================================
@@ -138,41 +138,18 @@ jobs:
           args: '--accept-routes --accept-dns'
 
       - name: Setup kubectl
-        run: |
-          mkdir -p ~/.kube
-          # Decode base64 kubeconfig
-          if [ -n "${{ secrets.KUBE_CONFIG }}" ]; then
-            echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
-          else
-            echo "ERROR: KUBE_CONFIG secret not set"
-            exit 1
-          fi
-          chmod 600 ~/.kube/config
-          # Skip TLS verification
-          kubectl config set-cluster default --insecure-skip-tls-verify=true --server=https://100.91.146.79:6443
-          # Verify
-          kubectl config view
-          kubectl get nodes
+        uses: azure/k8s-set-context@v1
+        with:
+          method: kubeconfig
+          kubeconfig: ${{ secrets.KUBE_CONFIG }}
 
       - name: Deploy to Kubernetes
         run: |
-          # Apply manifests with TLS verification disabled
           kubectl apply -k k8s/ -n project-pulse --validate=false
-
-          # Update images
           kubectl set image deployment/pulse-api \
-            pulse-api=ghcr.io/digiacomi-shared/project-pulse-api:latest \
-            -n project-pulse
-
-          kubectl set image deployment/pulse-workers \
-            worker=ghcr.io/digiacomi-shared/project-pulse-api:latest \
-            -n project-pulse
-
-          kubectl set image deployment/pulse-beat \
-            beat=ghcr.io/digiacomi-shared/project-pulse-api:latest \
+            api=ghcr.io/michaeldigiacomi/project-pulse-api:latest \
             -n project-pulse
 
       - name: Verify deployment
         run: |
           kubectl rollout status deployment/pulse-api -n project-pulse --timeout=5m
-          kubectl rollout status deployment/pulse-workers -n project-pulse --timeout=5m

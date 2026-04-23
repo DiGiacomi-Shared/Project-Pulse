@@ -3,6 +3,10 @@ kind: Deployment
 metadata:
   name: pulse-frontend
   namespace: project-pulse
+  labels:
+    app.kubernetes.io/name: project-pulse
+    app.kubernetes.io/component: frontend
+    environment: production
 spec:
   replicas: 1
   selector:
@@ -12,11 +16,15 @@ spec:
     metadata:
       labels:
         app: pulse-frontend
+        app.kubernetes.io/name: project-pulse
+        app.kubernetes.io/component: frontend
     spec:
+      imagePullSecrets:
+        - name: ghcr-registry-secret
       containers:
         - name: frontend
-          image: project-pulse-frontend:latest
-          imagePullPolicy: Never
+          image: ghcr.io/michaeldigiacomi/project-pulse-frontend:latest
+          imagePullPolicy: Always
           ports:
             - containerPort: 80
           resources:
@@ -34,6 +42,9 @@ kind: Service
 metadata:
   name: pulse-frontend
   namespace: project-pulse
+  labels:
+    app.kubernetes.io/name: project-pulse
+    app.kubernetes.io/component: frontend
 spec:
   selector:
     app: pulse-frontend

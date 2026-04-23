@@ -3,6 +3,10 @@ kind: Deployment
 metadata:
   name: pulse-api
   namespace: project-pulse
+  labels:
+    app.kubernetes.io/name: project-pulse
+    app.kubernetes.io/component: api
+    environment: production
 spec:
   replicas: 1
   selector:
@@ -12,11 +16,15 @@ spec:
     metadata:
       labels:
         app: pulse-api
+        app.kubernetes.io/name: project-pulse
+        app.kubernetes.io/component: api
     spec:
+      imagePullSecrets:
+        - name: ghcr-registry-secret
       containers:
         - name: api
-          image: project-pulse-api:latest
-          imagePullPolicy: Never
+          image: ghcr.io/michaeldigiacomi/project-pulse-api:latest
+          imagePullPolicy: Always
           ports:
             - containerPort: 8000
           env:
@@ -29,9 +37,12 @@ spec:
             - name: ACE_PG_USER
               value: "context_engine"
             - name: ACE_PG_PASSWORD
-              value: "ctx2024engine"
+              valueFrom:
+                secretKeyRef:
+                  name: pulse-secrets
+                  key: ACE_PG_PASSWORD
             - name: OLLAMA_URL
-              value: "http://100.100.227.127:11434"
+              value: "http://ollama.ollama.svc.cluster.local:11434"
             - name: OLLAMA_MODEL
               value: "nomic-embed-text"
             - name: CORS_ORIGINS
@@ -63,6 +74,9 @@ kind: Service
 metadata:
   name: pulse-api
   namespace: project-pulse
+  labels:
+    app.kubernetes.io/name: project-pulse
+    app.kubernetes.io/component: api
 spec:
   selector:
     app: pulse-api

@@ -18,7 +18,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: digiacomi-shared/project-pulse-frontend
+  IMAGE_NAME: michaeldigiacomi/project-pulse-frontend
 
 jobs:
   # ============================================
@@ -124,19 +124,17 @@ jobs:
           authkey: ${{ secrets.TAILSCALE_AUTH_KEY }}
           args: '--accept-routes --accept-dns'
 
-      - name: Set up kubectl
-        uses: # Setup kubectl manually
+      - name: Setup kubectl
+        uses: azure/k8s-set-context@v1
         with:
+          method: kubeconfig
           kubeconfig: ${{ secrets.KUBE_CONFIG }}
 
       - name: Deploy to Kubernetes
         run: |
-          # Apply manifests
-          kubectl apply -k k8s/ -n project-pulse
-
-          # Update image
+          kubectl apply -k k8s/ -n project-pulse --validate=false
           kubectl set image deployment/pulse-frontend \
-            pulse-frontend=ghcr.io/digiacomi-shared/project-pulse-frontend:latest \
+            frontend=ghcr.io/michaeldigiacomi/project-pulse-frontend:latest \
             -n project-pulse
 
       - name: Verify deployment
